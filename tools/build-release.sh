@@ -41,12 +41,15 @@ build_xorg libXfixes-6.0.1 b695f93cd2499421ab02d22744458e650ccc88c1d4c8130d60200
 build_xorg libXScrnSaver-1.2.4 75cd2859f38e207a090cac980d76bc71e9da99d48d09703584e00585abc920fe
 
 mkdir app
-cp -R "$src/Makefile" "$src/config.ini" "$src/src" "$src/vendor" "$src/assets" app
+cp -R "$src/LICENSE" "$src/Makefile" "$src/config.ini" "$src/src" "$src/vendor" "$src/assets" app
 make -C app -j "$jobs" STATIC=1 VERSION="$version" > "$tmp/desktop.log" 2>&1 || { cat "$tmp/desktop.log"; exit 1; }
 artifact="desktop-linux-$(uname -m)"
 mkdir -p "$output" "$tmp/package/bin" "$tmp/package/share/desktop"
 strip -o "$tmp/package/bin/desktop" app/build/desktop
 test "$("$tmp/package/bin/desktop" --version)" = "desktop $version"
+make -C app install BINDIR=/bin DATADIR=/share/desktop PREFIX= DESTDIR="$tmp/install" \
+    STATIC=1 VERSION="$version" >/dev/null
+cp -R "$tmp/install/share/." "$tmp/package/share/"
 
 archive=ffmpeg-9.1.tar.xz
 if [ -f "/sources/$archive" ]; then cp "/sources/$archive" .
@@ -77,8 +80,6 @@ cp "$tmp/package/bin/desktop" "$output/$artifact"
 mkdir -p "$output/test-bin"
 cp "$tmp/package/bin/desktop-ffmpeg" "$tmp/package/bin/desktop-ffprobe" "$output/test-bin"
 cp "$archive" "$output/"
-make -C app install BINDIR=/bin DATADIR=/share/desktop PREFIX= DESTDIR="$tmp/install" STATIC=1 >/dev/null
-cp -R "$tmp/install/share/." "$tmp/package/share/"
 tar -czf "$output/$artifact.tar.gz" -C "$tmp/package" .
 (cd "$output" && sha256sum "$artifact" > "$artifact.sha256" &&
     sha256sum "$artifact.tar.gz" > "$artifact.tar.gz.sha256")

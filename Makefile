@@ -3,7 +3,7 @@ PKG_CONFIG ?= pkg-config
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 DATADIR ?= $(PREFIX)/share/desktop
-VERSION ?= 0.1.0
+VERSION ?= 0.1.1
 BUILD ?= build
 PACKAGES = x11 xrandr xrender xfixes xext xscrnsaver freetype2 harfbuzz libpng libjpeg libwebp
 

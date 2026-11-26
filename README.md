@@ -12,7 +12,7 @@ Install or upgrade the latest release for Linux x86-64 or ARM64.
 curl -fsSL https://raw.githubusercontent.com/mattmezza/desktop/main/install.sh | sh
 ```
 
-The installer verifies the release checksum and installs into `~/.local` by default. Set `PREFIX` to install elsewhere, or `DESKTOP_VERSION=v0.1.0` to pin a release. Put the installation's `bin` directory on your PATH. The archive includes static Desktop, FFmpeg, and FFprobe executables. It preserves existing configuration on upgrades.
+The installer verifies the release checksum and installs into `~/.local` by default. Set `PREFIX` to install elsewhere, or `DESKTOP_VERSION=v0.1.1` to pin a release. Put the installation's `bin` directory on your PATH. The archive includes static Desktop, FFmpeg, and FFprobe executables. It preserves existing configuration on upgrades.
 
 For a source build, install a C toolchain, pkg-config, Xlib, XRandR, XRender, XFixes, Xext, XScreenSaver, FreeType, HarfBuzz, libpng, libjpeg-turbo, and libwebp development files. CUI and the Geist faces are bundled. Use `ffmpeg` and `ffprobe` from PATH for video.
 
