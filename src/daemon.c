@@ -32,9 +32,10 @@ typedef struct {
     Media current;
     Player players[MAX_OUTPUTS];
     double dx[MAX_OUTPUTS], dy[MAX_OUTPUTS], parallax_speed[MAX_OUTPUTS];
+    double blur_phase[MAX_OUTPUTS], blur_radius[MAX_OUTPUTS];
     uint64_t fade_start, layout_due, inspect_at, paint_at, last_tick, retry_at;
     uint32_t occupied;
-    bool drifting, playing, blanked, logged_in, dirty, publish, stop;
+    bool drifting, playing, blurring, blur_ready, blanked, logged_in, dirty, publish, stop;
     char notice[ERROR_SIZE];
 } Daemon;
 
@@ -172,6 +173,8 @@ select_media(Daemon *d, Media *media, bool update_state, bool transition, char *
     d->fade_start = fade ? now_ms() : 0;
     d->dirty = d->publish = true;
     d->notice[0] = '\0';
+    if (d->cfg.blur && d->cfg.blur_radius && !d->x.convolution)
+        snprintf(d->notice, sizeof d->notice, "This X11 display does not support wallpaper blur.");
     if (update_state) {
         strcpy(d->state.path, path);
         d->state.changed = time(NULL);
@@ -258,7 +261,8 @@ reapply(Daemon *d, bool force, char *error)
         snprintf(error, ERROR_SIZE, "Could not query the X11 monitor layout.");
         return false;
     }
-    if (!force && same_layout(&layout, &d->x.layout)) {
+    bool unchanged = same_layout(&layout, &d->x.layout);
+    if (!force && unchanged) {
         if (d->current.path && !x11_owns_background(&d->x)) d->dirty = d->publish = true;
         return true;
     }
@@ -269,6 +273,7 @@ reapply(Daemon *d, bool force, char *error)
     clear_playback(d);
     d->fade_start = 0;
     d->inspect_at = 0;
+    if (!unchanged) d->blur_ready = false;
     memset(d->dx, 0, sizeof d->dx);
     memset(d->dy, 0, sizeof d->dy);
     memset(d->parallax_speed, 0, sizeof d->parallax_speed);
@@ -382,6 +387,24 @@ advance_video(Daemon *d, size_t i, double delta, bool active, bool suspended)
     return true;
 }
 
+static bool
+advance_blur(Daemon *d, size_t i, double delta, bool occupied, bool suspended)
+{
+    const Config *cfg = &d->cfg;
+    bool enabled = cfg->blur && cfg->blur_radius && d->x.convolution;
+    double target = enabled && occupied ? 1 : 0;
+    double phase = d->blur_phase[i];
+    if (!enabled || !d->blur_ready || (!suspended && !cfg->blur_transition_ms)) phase = target;
+    else if (!suspended) {
+        double step = delta / cfg->blur_transition_ms;
+        phase += fmax(-step, fmin(step, target - phase));
+    }
+    d->blur_phase[i] = phase;
+    double half = .5 * pow(2 * fmin(phase, 1 - phase), cfg->blur_easing_power);
+    d->blur_radius[i] = (phase < .5 ? half : 1 - half) * cfg->blur_radius;
+    return !suspended && phase != target;
+}
+
 static void
 draw(Daemon *d, uint64_t now, bool force)
 {
@@ -395,10 +418,11 @@ draw(Daemon *d, uint64_t now, bool force)
     bool drift_enabled = cfg->parallax && cfg->travel && !suspended && !video;
     int px = -1, py = -1;
     if (drift_enabled || d->drifting) x11_pointer(&d->x, &px, &py);
-    d->drifting = d->playing = false;
+    d->drifting = d->playing = d->blurring = false;
     for (size_t i = 0; i < d->x.layout.count; ++i) {
         const Output *o = &d->x.layout.items[i];
         bool occupied = d->occupied & (UINT32_C(1) << i);
+        d->blurring |= advance_blur(d, i, delta, occupied, suspended);
         if (video) d->playing |= advance_video(d, i, delta, !cfg->video_empty || !occupied, suspended);
         bool drift_active = drift_enabled && (!cfg->parallax_empty || !occupied);
         double speed = suspended || video ? 0 :
@@ -411,10 +435,19 @@ draw(Daemon *d, uint64_t now, bool force)
         double dy = approach(d->dy[i], ny, delta, cfg->ease_ms);
         if (fabs(dx - nx) < 0.12) dx = nx;
         if (fabs(dy - ny) < 0.12) dy = ny;
+        if (cfg->parallax_max_speed) {
+            double x_step = dx - d->dx[i], y_step = dy - d->dy[i];
+            double distance = hypot(x_step, y_step), limit = cfg->parallax_max_speed * delta / 1000;
+            if (distance > limit) {
+                dx = d->dx[i] + x_step * (limit / distance);
+                dy = d->dy[i] + y_step * (limit / distance);
+            }
+        }
         if (speed > .001 || dx != 0 || dy != 0) d->drifting = true;
         d->dx[i] = dx;
         d->dy[i] = dy;
     }
+    d->blur_ready = true;
     double fade = 0;
     if (d->fade_start) {
         double t = cfg->crossfade_ms ? (now - d->fade_start) / (double)cfg->crossfade_ms : 1;
@@ -422,7 +455,7 @@ draw(Daemon *d, uint64_t now, bool force)
         else fade = 1 - t * t * (3 - 2 * t);
         d->dirty = true;
     }
-    x11_paint(&d->x, cfg, &d->current, d->dx, d->dy, fade, d->dirty || force);
+    x11_paint(&d->x, cfg, &d->current, d->dx, d->dy, d->blur_radius, fade, d->dirty || force);
     if (d->publish && !d->fade_start) {
         x11_publish(&d->x);
         d->publish = false;
@@ -457,9 +490,9 @@ status_json(Daemon *d, FILE *out)
         fputs("{\"name\":", out);
         json_string(out, o->name);
         fprintf(out, ",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d,\"occupied\":%s,"
-                     "\"parallax_speed\":%.3f,\"video_speed\":%.3f}",
+                     "\"parallax_speed\":%.3f,\"video_speed\":%.3f,\"blur_radius_px\":%.3f}",
                 o->x, o->y, o->w, o->h, d->occupied & (UINT32_C(1) << i) ? "true" : "false",
-                d->parallax_speed[i], video_rate(&d->players[i], d->cfg.video_ramp_power));
+                d->parallax_speed[i], video_rate(&d->players[i], d->cfg.video_ramp_power), d->blur_radius[i]);
     }
     fputs("],\"notice\":", out);
     if (*d->notice) json_string(out, d->notice); else fputs("null", out);
@@ -667,7 +700,7 @@ daemon_run(const Paths *paths, int ready)
         }
         if (now >= d.paint_at || d.dirty) {
             draw(&d, now, false);
-            int delay = (d.playing || d.fade_start) ? 12 : d.drifting ? 1000 / d.cfg.parallax_fps : 100;
+            int delay = (d.playing || d.fade_start) ? 12 : d.blurring ? 16 : d.drifting ? 1000 / d.cfg.parallax_fps : 100;
             d.paint_at = now + (unsigned)delay;
         }
         uint64_t next = d.paint_at < d.inspect_at ? d.paint_at : d.inspect_at;

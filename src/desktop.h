@@ -28,8 +28,9 @@
     OPTION(INT, crossfade_ms, "layout", "crossfade_ms", 180, 0, 1500) \
     OPTION(BOOL, parallax, "parallax", "enabled", true, 0, 1) \
     OPTION(BOOL, parallax_empty, "parallax", "empty_only", true, 0, 1) \
-    OPTION(INT, travel, "parallax", "travel_px", 14, 0, 160) \
-    OPTION(INT, ease_ms, "parallax", "ease_ms", 180, 0, 2000) \
+    OPTION(INT, travel, "parallax", "travel_px", 6, 0, 160) \
+    OPTION(INT, ease_ms, "parallax", "ease_ms", 300, 0, 2000) \
+    OPTION(INT, parallax_max_speed, "parallax", "max_speed_px_s", 24, 0, 1000) \
     OPTION(INT, parallax_fps, "parallax", "fps", 30, 1, 60) \
     OPTION(BOOL, video_empty, "video", "empty_only", true, 0, 1) \
     OPTION(INT, video_ramp_ms, "video", "ramp_ms", 1000, 0, 5000) \
@@ -38,6 +39,10 @@
     OPTION(INT, video_max, "video", "max_dimension", 3840, 640, 8192) \
     OPTION(PATH, ffmpeg, "video", "ffmpeg", "desktop-ffmpeg", 0, 0) \
     OPTION(PATH, ffprobe, "video", "ffprobe", "desktop-ffprobe", 0, 0) \
+    OPTION(BOOL, blur, "blur", "enabled", true, 0, 1) \
+    OPTION(INT, blur_radius, "blur", "radius_px", 24, 0, 96) \
+    OPTION(INT, blur_transition_ms, "blur", "transition_ms", 650, 0, 5000) \
+    OPTION(INT, blur_easing_power, "blur", "easing_power", 3, 1, 6) \
     OPTION(INT, slowdown_ms, "motion", "slowdown_ms", 320, 0, 2000) \
     OPTION(BOOL, idle_pause, "motion", "pause_on_blank", true, 0, 1) \
     OPTION(STRING, after_login, "hooks", "after_login", "", 0, 0) \

@@ -55,6 +55,12 @@ x11_open(X11 *x, char *error)
     x->saver = XScreenSaverQueryExtension(d, &event, &err);
     x->dpms = DPMSQueryExtension(d, &event, &err) && DPMSCapable(d);
     x->shm = XShmQueryExtension(d) != False;
+    XFilters *filters = XRenderQueryFilters(d, x->root);
+    if (filters) {
+        for (int i = 0; i < filters->nfilter; ++i)
+            if (!strcmp(filters->filter[i], FilterConvolution)) x->convolution = true;
+        XFree(filters);
+    }
     x->rootmap = atom(x, "_XROOTPMAP_ID");
     x->esetroot = atom(x, "ESETROOT_PMAP_ID");
     x->clients = atom(x, "_NET_CLIENT_LIST");
@@ -84,6 +90,7 @@ x11_clear_video(X11 *x)
     if (!x->d) return;
     for (size_t i = 0; i < MAX_OUTPUTS; ++i) {
         Viewport *v = &x->viewports[i];
+        if (v->frame) x11_blur_clear(x, &v->blur);
         if (v->frame_pic) XRenderFreePicture(x->d, v->frame_pic);
         if (v->frame) XFreePixmap(x->d, v->frame);
         drop_upload(x->d, &v->upload);
@@ -98,6 +105,7 @@ x11_close(X11 *x)
 {
     if (!x->d) return;
     x11_clear_video(x);
+    for (size_t i = 0; i < MAX_OUTPUTS; ++i) x11_blur_clear(x, &x->viewports[i].blur);
     drop_upload(x->d, &x->upload);
     if (x11_owns_background(x)) {
         XDeleteProperty(x->d, x->root, x->rootmap);
@@ -344,6 +352,8 @@ x11_video_frame(X11 *x, size_t i, const Image *image, const Config *cfg)
         }
     }
     upload_pixels(x, &v->upload, v->frame, image, cfg);
+    v->blur.sampled = 0;
+    v->blur.filtered_radius = 0;
     x->video_updates |= UINT32_C(1) << i;
     return true;
 }
@@ -377,11 +387,13 @@ render_crop(X11 *x, Picture destination, const Config *cfg, const Media *media,
 static void
 prepare_crops(X11 *x, const Config *cfg, const Media *media, int padding)
 {
+    bool blur = cfg->blur && cfg->blur_radius && x->convolution;
     for (size_t i = 0; i < MAX_OUTPUTS; ++i) {
         Viewport *v = &x->viewports[i];
+        x11_blur_clear(x, &v->blur);
         if (v->still) XFreePixmap(x->d, v->still);
         v->still = None;
-        if (!padding || i >= x->layout.count) continue;
+        if ((!padding && !blur) || i >= x->layout.count) continue;
         const Output *o = &x->layout.items[i];
         v->still = XCreatePixmap(x->d, x->root, (unsigned)(o->w + 2 * padding),
                                 (unsigned)(o->h + 2 * padding), (unsigned)x->depth);
@@ -394,7 +406,7 @@ prepare_crops(X11 *x, const Config *cfg, const Media *media, int padding)
 
 void
 x11_paint(X11 *x, const Config *cfg, const Media *media, const double *dx,
-          const double *dy, double fade, bool full)
+          const double *dy, const double *blur_radius, double fade, bool full)
 {
     if (!x->source) return;
     Display *d = x->d;
@@ -411,6 +423,9 @@ x11_paint(X11 *x, const Config *cfg, const Media *media, const double *dx,
     for (size_t i = 0; i < l->count; ++i) {
         const Output *o = &l->items[i];
         Viewport *v = &x->viewports[i];
+        int radius = (int)lround(blur_radius[i] * BLUR_PRECISION);
+        if (v->blur_radius != radius) updates |= UINT32_C(1) << i;
+        v->blur_radius = radius;
         if (v->still && (lround(dx[i]) != v->dx || lround(dy[i]) != v->dy)) updates |= UINT32_C(1) << i;
         if (updates & (UINT32_C(1) << i)) {
             if (o->x < left) left = o->x;
@@ -427,14 +442,18 @@ x11_paint(X11 *x, const Config *cfg, const Media *media, const double *dx,
         if (!full && !x->overlaps && !(updates & (UINT32_C(1) << i))) continue;
         v->dx = offset_x;
         v->dy = offset_y;
+        int sx = padding + offset_x, sy = padding + offset_y;
+        int w = o->w + 2 * padding, h = o->h + 2 * padding;
+        if (v->blur_radius >= BLUR_MIN_RADIUS && x11_blur_paint(x, v, o, sx, sy, w, h)) continue;
         // Sample each still once at output resolution so fine details stay stable during motion.
         if (v->frame_pic) XRenderComposite(d, PictOpSrc, v->frame_pic, None, x->canvas_pic, 0, 0, 0, 0,
                                            o->x, o->y, (unsigned)o->w, (unsigned)o->h);
         else if (v->frame) XCopyArea(d, v->frame, x->canvas, x->gc, 0, 0,
                                     (unsigned)o->w, (unsigned)o->h, o->x, o->y);
-        else if (v->still) XCopyArea(d, v->still, x->canvas, x->gc, padding + offset_x, padding + offset_y,
+        else if (v->still) XCopyArea(d, v->still, x->canvas, x->gc, sx, sy,
                                     (unsigned)o->w, (unsigned)o->h, o->x, o->y);
         else render_crop(x, x->canvas_pic, cfg, media, o, o->x, o->y, 0);
+        if (v->blur_radius > 0 && v->blur_radius < BLUR_MIN_RADIUS) x11_blur_paint(x, v, o, sx, sy, w, h);
     }
     if (fade > 0 && x->former_pic) {
         XRenderColor color = {.alpha = (unsigned short)(fade * 65535)};

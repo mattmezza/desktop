@@ -102,11 +102,19 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
     desktop("config", "set", "layout.crossfade_ms", "60")
     assert (config / "config.ini").is_symlink() and "# stowed marker" in cfg.read_text()
     assert desktop("config", "set", "ui.corner_radius", 61, check=False).returncode != 0
+    assert desktop("config", "set", "blur.easing_power", 7, check=False).returncode != 0
     run("xset", "s", "off")
     wm = sp.Popen([os.environ["TEST_WM"]], stdout=sp.DEVNULL, stderr=sp.DEVNULL) if os.environ.get("TEST_WM") else None
     x = X()
     ui = None
     try:
+        def output(name):
+            return next(o for o in status()["outputs"] if o["name"] == name)
+
+        def visible_app(window, visible):
+            (x.map if visible else x.unmap)(x.d, window)
+            x.sync(x.d, 0)
+
         desktop("set", first)
         until(lambda: x.read(60, 600) == 0xEC1C3E and x.read(1300, 600) == 0x1937D2)
         assert "_XROOTPMAP_ID(PIXMAP)" in run("xprop", "-root", "_XROOTPMAP_ID").stdout
@@ -121,24 +129,39 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         assert docked["wallpaper"] == str(first) and docked["changed_at"] == snapshot["changed_at"]
         until(lambda: x.read(1300, 700) == 0x0D0E0F)
         if not wm:
-            def output(name):
-                return next(o for o in status()["outputs"] if o["name"] == name)
+            run("xdotool", "mousemove", "720", "240")
+            until(lambda: x.read(710, 325) == 0xEC1C3E and x.read(560, 680) == 0xEC1C3E)
+            window = x.app()
+            until(lambda: 0 < output("Wide")["blur_radius_px"] < 23)
+            until(lambda: output("Wide")["blur_radius_px"] == 24)
+            assert 25 < (x.read(710, 325) >> 16) < 213
+            assert output("Laptop")["blur_radius_px"] == 0 and x.read(560, 680) == 0xEC1C3E
+            visible_app(window, False)
+            until(lambda: 0 < output("Wide")["blur_radius_px"] < 23)
+            until(lambda: output("Wide")["blur_radius_px"] == 0 and x.read(710, 325) == 0xEC1C3E)
 
+        desktop("config", "set", "blur.enabled", "false")
+        if not wm:
             run("xdotool", "mousemove", "570", "690")
-            until(lambda: x.read(565, 650) == 0xEC1C3E)
+            until(lambda: x.read(568, 650) == 0xEC1C3E)
             until(lambda: output("Wide")["parallax_speed"] > .9 and output("Laptop")["parallax_speed"] > .9)
             window = x.app()
             until(lambda: output("Wide")["occupied"] and output("Wide")["parallax_speed"] < .03)
             assert not output("Laptop")["occupied"] and output("Laptop")["parallax_speed"] > .9
             run("xdotool", "mousemove", "950", "690")
-            until(lambda: x.read(565, 650) == 0x1937D2)
+            until(lambda: x.read(568, 650) == 0x1937D2)
             x.move(x.d, window, 180, 525)
             x.sync(x.d, 0)
             until(lambda: output("Laptop")["occupied"] and output("Laptop")["parallax_speed"] < .03)
-            until(lambda: x.read(565, 650) == 0xEC1C3E)
-            x.unmap(x.d, window)
-            x.sync(x.d, 0)
-            until(lambda: x.read(565, 650) == 0x1937D2)
+            until(lambda: x.read(568, 650) == 0xEC1C3E)
+            visible_app(window, False)
+            until(lambda: x.read(568, 650) == 0x1937D2)
+            run("xdotool", "mousemove", "121", "690")
+            until(lambda: x.read(573, 650) == 0xEC1C3E)
+            sweep = time.monotonic()
+            run("xdotool", "mousemove", "1018", "690")
+            until(lambda: x.read(568, 650) == 0x1937D2)
+            assert time.monotonic() - sweep > .20
         run("xrandr", "--delmonitor", "Laptop")
         run("xrandr", "--delmonitor", "Wide")
         desktop("reapply")
@@ -180,10 +203,14 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
 
         video = wallpapers / "Motion.mp4"
         run("ffmpeg", "-v", "error", "-threads", "1", "-f", "lavfi", "-i",
-            "testsrc2=size=1536x960:rate=12", "-t", "1", "-c:v", "mpeg4", "-threads", "1", str(video))
+            "testsrc2=size=1536x960:rate=12", "-vf",
+            "drawbox=x=0:y=0:w=768:h=260:color=red:t=fill,drawbox=x=768:y=0:w=768:h=260:color=blue:t=fill",
+            "-t", "1", "-c:v", "mpeg4", "-threads", "1", str(video))
         desktop("config", "set", "video.ramp_ms", "1200")
+        desktop("config", "set", "blur.enabled", "true")
         desktop("set", video)
         until(lambda: status()["kind"] == "video" and status()["video_speed"] > .9)
+        assert x.read(710, 170) >> 16 > 245
         p = x.read(300, 400)
         until(lambda: x.read(300, 400) != p)
         x.map(x.d, window)
@@ -193,6 +220,9 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         assert .82 < status()["video_speed"] < 1
         until(lambda: status()["occupied"] and .15 < status()["video_speed"] < .85)
         until(lambda: status()["occupied"] and status()["video_speed"] < .01)
+        until(lambda: status()["outputs"][0]["blur_radius_px"] == 24)
+        if not wm:  # The window manager can tile the first window over the sample point.
+            assert 25 < (x.read(710, 170) >> 16) < 225
         p = x.read(300, 400)
         time.sleep(.35)
         assert x.read(300, 400) == p
@@ -201,7 +231,8 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         until(lambda: not status()["occupied"])
         time.sleep(.48)
         assert 0 < status()["video_speed"] < .18
-        until(lambda: status()["video_speed"] > .99)
+        until(lambda: status()["video_speed"] > .99 and status()["outputs"][0]["blur_radius_px"] == 0)
+        assert x.read(710, 170) >> 16 > 245
         if not wm:
             run("xrandr", "--setmonitor", "Wide", "1440/380x480/127+0+0", "screen")
             run("xrandr", "--setmonitor", "Laptop", "900/238x420/111+120+480", "none")
@@ -263,14 +294,19 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         time.sleep(.35)
         run("xdotool", "mousemove", "--window", wid, "514", "214", "click", "1")
         time.sleep(.25)
-        run("xdotool", "mousemove", "--window", wid, "725", "375", "click", "1")
-        time.sleep(.25)
         run("xdotool", "mousemove", "--window", wid, "672", "614", "click", "1")
         until(lambda: status()["rotation"] == "interval")
+        run("xdotool", "mousemove", "--window", wid, "682", "34", "click", "1")
+        time.sleep(.35)
+        run("xdotool", "mousemove", "--window", wid, "725", "88", "click", "1")
+        run("xdotool", "mousemove", "--window", wid, "725", "214", "click", "1")
+        time.sleep(.25)
+        run("xdotool", "mousemove", "--window", wid, "672", "614", "click", "1")
+        until(lambda: "enabled = false" in cfg.read_text().split("[blur]")[1].split("[motion]")[0])
         assert "empty_only = false" in cfg.read_text().split("[parallax]")[1].split("[video]")[0]
         run("xdotool", "key", "Escape")
         assert ui.wait(5) == 0, ui.stderr.read()
-        print("X11 checks passed: crop and root clicks, eligibility, rotation, video, motion, stowed config, and settings.")
+        print("X11 checks passed: crop, eligibility, rotation, parallax, video, blur, and settings.")
     finally:
         desktop("stop", check=False)
         x.close(x.d)

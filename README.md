@@ -26,9 +26,9 @@ make install PREFIX="$HOME/.local"
 
 Run `desktop` to browse and apply wallpapers. Select a tile to see the crop on each active output, then choose **Set wallpaper**. **Shuffle** applies a new eligible wallpaper. Search by filename, use the page arrows or the scroll wheel, and press **Esc** to go back or close.
 
-In **Settings…**, choose your folder, rotation schedule, and when each motion effect plays. Rotation can be manual, once at X login, every N minutes, or once per local calendar day.
+In **Settings…**, choose your folder and rotation schedule. Rotation can be manual, once at X login, every N minutes, or once per local calendar day. Open **Effects…** to control wallpaper blur, pointer parallax, and when videos play.
 
-![Desktop settings show the wallpaper folder, rotation schedule, and three motion switches](media/settings.png)
+![Desktop’s Effects page shows wallpaper blur, pointer parallax, and video playback options](media/effects.png)
 
 Desktop supports JPEG, PNG, and WebP images, plus local video in formats including MP4, WebM, MOV, and MKV. Videos loop muted. Desktop crops the same source for each output and skips media smaller than any output, with extra headroom for image parallax. If a new monitor makes the current wallpaper ineligible, Desktop can use an eligible temporary choice and restore your selection when it fits again.
 
@@ -57,7 +57,11 @@ Copy [config.ini](config.ini) to `${XDG_CONFIG_HOME:-$HOME/.config}/desktop/conf
 
 Empty theme values inherit `desktop.*` Xresources, the mwm palette, then the bundled defaults. Use `desktop.background`, `desktop.panel`, `desktop.foreground`, `desktop.muted`, `desktop.border`, `desktop.accent`, `desktop.onAccent`, `desktop.cornerRadius`, `desktop.font`, or `desktop.mono`. Explicit INI values take priority. The bundled fonts are Geist and Geist Mono.
 
-With **Parallax only when desktop is empty** enabled, motion returns to the neutral crop on each output that shows an application window. With **Video only when desktop is empty** enabled, playback eases to a stop on each occupied output and gradually resumes from the held frame when that output is empty. `video.ramp_ms` sets the duration. `video.ramp_power` sets the easing strength from 1 (linear) to 6 (strongest), with 3 (cubic) by default. On mwm, windows on hidden tags are off-screen and count as hidden. Desktop observes X11 blanking and DPMS. A locker can also explicitly inhibit motion for its lifetime.
+- **Wallpaper blur** gradually softens images and videos behind open windows, then reveals the sharp wallpaper when the display is empty. It defaults to a 24 px Gaussian blur with a 650 ms transition. Adjust `blur.radius_px`, `blur.transition_ms`, or `blur.easing_power` (1 for linear, 3 for the default cubic ease-in-out).
+- **Pointer parallax** shifts images up to 6 px from center on each axis at up to 24 px/s by default. Tune `parallax.travel_px`, `parallax.ease_ms`, and `parallax.max_speed_px_s`. With **Only on an empty desktop** enabled, it settles back to center on occupied outputs.
+- **Video playback** eases to a stop on occupied outputs and gradually resumes from the held frame when **Only on an empty desktop** is enabled. `video.ramp_ms` sets the duration and `video.ramp_power` sets the easing strength from 1 (linear) to 6 (strongest), with 3 (cubic) by default.
+
+Effects follow each display independently. On mwm, windows on hidden tags are off-screen and count as hidden. Desktop observes X11 blanking and DPMS. A locker can also explicitly inhibit motion for its lifetime.
 
 ```sh
 desktop status --json
@@ -67,14 +71,15 @@ desktop next
 desktop pause
 desktop resume
 desktop reapply
-desktop config set parallax.travel_px 10
+desktop config set parallax.travel_px 4
+desktop config set blur.radius_px 18
 desktop config set video.empty_only false
 desktop config check
 desktop reload
 desktop inhibit -- lok
 ```
 
-The JSON commands carry a schema version. Errors use stderr and nonzero exit status. See `desktop --help` for all commands.
+The JSON commands carry a schema version. `status --json` includes the current blur radius and playback speed per output. Errors use stderr and nonzero exit status. See `desktop --help` for all commands.
 
 ## Build and release
 

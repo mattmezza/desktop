@@ -22,8 +22,9 @@
 extern const unsigned char geist_start[], geist_end[], geist_medium_start[], geist_medium_end[];
 extern const unsigned char geist_mono_start[], geist_mono_end[], icons_start[];
 
-typedef enum { MONITOR, SETTINGS, BACK, SHUFFLE, PREVIOUS, NEXT, PLAY, CHECK, SEARCH, FOLDER, PHOTO, ICONS } Icon;
-typedef enum { BROWSE, PREFERENCES } EditorScreen;
+typedef enum { MONITOR, SETTINGS, BACK, SHUFFLE, PREVIOUS, NEXT, PLAY, CHECK, SEARCH, FOLDER, PHOTO, SPARKLES, ICONS } Icon;
+typedef enum { BROWSE, PREFERENCES, EFFECTS } EditorScreen;
+enum { BLUR_SWITCH, PARALLAX_SWITCH, PARALLAX_EMPTY_SWITCH, VIDEO_EMPTY_SWITCH, SWITCH_COUNT };
 typedef enum { NONE, SCAN, THUMB, PREVIEW } Job;
 typedef struct {
     pthread_mutex_t mutex;
@@ -60,7 +61,7 @@ typedef struct {
     cui_theme theme;
     cui_edit *search, *folder, *minutes;
     cui_input_state search_input, folder_input, minutes_input;
-    cui_switch_state switches[3];
+    cui_switch_state switches[SWITCH_COUNT];
     cui_platform platform;
     char search_text[256], folder_text[PATH_MAX], minutes_text[16];
     char active[PATH_MAX], message[ERROR_SIZE], clipboard_text[PATH_MAX];
@@ -457,8 +458,8 @@ input(Editor *e, const char *name, cui_rect r, cui_edit *edit, cui_input_state *
 static void
 navigate(Editor *e, EditorScreen screen)
 {
+    if (screen != BROWSE) e->edit_cfg = e->cfg;
     if (screen == PREFERENCES) {
-        e->edit_cfg = e->cfg;
         cui_edit_set_content(e->folder, (cui_edit_content){.text = cui_string(e->cfg.directory)});
         char value[16];
         snprintf(value, sizeof value, "%d", e->cfg.minutes);
@@ -628,9 +629,17 @@ browse(Editor *e)
     const float reason_h = (panel_w < 200 ? 4 : 3) * reason_line;
     const float preview_h = fmaxf(fminf(258, fmaxf(145, e->h * .37f)), m && !ready ? 168 + reason_h : 0);
     const float top = 70, bar = top + preview_h + 16;
+    const float settings_w = fmaxf(124, cui_measure_text(e->ui, cui_string("Settings…"), t.font_size).width + 42);
+    const float effects_w = fmaxf(104, cui_measure_text(e->ui, cui_string("Effects…"), t.font_size).width + 42);
     icon(e, MONITOR, (cui_rect){margin, 24, 22, 22}, t.text);
     text_at(e, (cui_rect){margin + 31, 18, 240, 34}, "Desktop", t.font_size + 8, t.text, false, true, false);
-    if (button(e, "settings", "Settings…", (cui_rect){e->w - 148, 17, 124, 36}, SETTINGS, GHOST, false)) {
+    if (button(e, "effects", "Effects…", (cui_rect){e->w - margin - settings_w - effects_w - 6, 17, effects_w, 36},
+               SPARKLES, GHOST, false)) {
+        navigate(e, EFFECTS);
+        return;
+    }
+    if (button(e, "settings", "Settings…", (cui_rect){e->w - margin - settings_w, 17, settings_w, 36},
+               SETTINGS, GHOST, false)) {
         navigate(e, PREFERENCES);
         return;
     }
@@ -708,39 +717,46 @@ browse(Editor *e)
 static void
 save_preferences(Editor *e)
 {
-    if (!*e->folder_text) {
+    bool effects = e->screen == EFFECTS;
+    if (!effects && !*e->folder_text) {
         snprintf(e->message, sizeof e->message, "Enter a wallpaper folder.");
         e->dirty = true;
         return;
     }
     Config *c = &e->edit_cfg;
-    Setting changes[6] = {
+    Setting preferences[] = {
         {"library.directory", e->folder_text},
         {"rotation.mode", rotation_names[c->rotation]},
-        {"parallax.enabled", c->parallax ? "true" : "false"},
-        {"parallax.empty_only", c->parallax_empty ? "true" : "false"},
-        {"video.empty_only", c->video_empty ? "true" : "false"},
         {"rotation.minutes", e->minutes_text}
     };
+    Setting motion[] = {
+        {"blur.enabled", c->blur ? "true" : "false"},
+        {"parallax.enabled", c->parallax ? "true" : "false"},
+        {"parallax.empty_only", c->parallax_empty ? "true" : "false"},
+        {"video.empty_only", c->video_empty ? "true" : "false"}
+    };
     char error[ERROR_SIZE] = "";
-    if (!config_write(e->paths, changes, c->rotation == ROT_INTERVAL ? 6 : 5, error) ||
+    size_t count = effects ? sizeof motion / sizeof *motion : c->rotation == ROT_INTERVAL ? 3 : 2;
+    if (!config_write(e->paths, effects ? motion : preferences, count, error) ||
         !config_read(e->paths, &e->cfg, error)) {
         snprintf(e->message, sizeof e->message, "%s", error);
         e->dirty = true;
         return;
     }
     navigate(e, BROWSE);
-    e->page = 0;
-    e->scan = true;
-    if (action(e, "reload", NULL)) snprintf(e->message, sizeof e->message, "Settings saved.");
+    if (!effects) { e->page = 0; e->scan = true; }
+    if (action(e, "reload", NULL))
+        snprintf(e->message, sizeof e->message, "%s saved.", effects ? "Effects" : "Settings");
 }
 
 static bool
 switch_at(Editor *e, cui_rect r, const char *title, bool *value, size_t index, bool disabled)
 {
+    static const char *const ids[SWITCH_COUNT] = {"blur", "parallax", "parallax-empty", "video-empty"};
     cui_begin_absolute_box(e->ui, 0, (cui_box){.align_y = CUI_ALIGN_CENTER}, r);
-    cui_id id = cui_id_from(e->ui, title);
+    cui_id id = cui_id_from(e->ui, ids[index]);
     cui_switch_options options = cui_switch_options_default();
+    options.size = index == BLUR_SWITCH || index == PARALLAX_SWITCH ? CUI_CONTROL_LARGE : CUI_CONTROL_MEDIUM;
     options.width = r.w;
     options.label_left = true;
     options.disabled = disabled;
@@ -752,18 +768,36 @@ switch_at(Editor *e, cui_rect r, const char *title, bool *value, size_t index, b
     return changed;
 }
 
+static bool
+preferences_header(Editor *e, const char *title)
+{
+    if (button(e, "back", "Back to wallpapers", (cui_rect){24, 17, 35, 36}, BACK, GHOST, false)) {
+        navigate(e, BROWSE);
+        return false;
+    }
+    text_at(e, (cui_rect){67, 16, e->w - 92, 38}, title, e->theme.font_size + 8, e->theme.text, false, true, false);
+    return true;
+}
+
+static void
+preferences_footer(Editor *e, float margin, float width, const char *label)
+{
+    float button_w = fmaxf(140, cui_measure_text(e->ui, cui_string(label), e->theme.font_size).width + 42);
+    if (*e->message)
+        text_at(e, (cui_rect){margin, e->h - 55, width - button_w - 9, 35}, e->message,
+                e->theme.font_size - 1, e->theme.muted, false, false, false);
+    if (button(e, "save", label, (cui_rect){e->w - margin - button_w, e->h - 54, button_w, 36}, CHECK, PRIMARY, false))
+        save_preferences(e);
+}
+
 static void
 preferences(Editor *e)
 {
     cui_theme t = e->theme;
     const float margin = fmaxf(24, (e->w - 580) / 2.0f), width = e->w - 2 * margin;
     const float gap = fminf(18, fmaxf(3, (e->h - 460) / 9.0f));
-    const float top = 66, rotation = top + 72 + gap, motion = rotation + 92 + gap;
-    if (button(e, "back", "Back to wallpapers", (cui_rect){24, 17, 35, 36}, BACK, GHOST, false)) {
-        navigate(e, BROWSE);
-        return;
-    }
-    text_at(e, (cui_rect){67, 16, e->w - 92, 38}, "Wallpaper settings", t.font_size + 8, t.text, false, true, false);
+    const float top = 66, rotation = top + 72 + gap;
+    if (!preferences_header(e, "Wallpaper settings")) return;
     text_at(e, (cui_rect){margin, top, width, 24}, "Wallpaper folder", t.font_size, t.text, false, true, false);
     input(e, "Wallpaper folder", (cui_rect){margin, top + 29, width, 36}, e->folder, &e->folder_input, "/path/to/wallpapers");
 
@@ -783,22 +817,32 @@ preferences(Editor *e)
                 t.font_size, t.muted, false, false, false);
     }
 
-    float motion_y = motion + (e->edit_cfg.rotation == ROT_INTERVAL ? 23 : 0);
-    box(e, (cui_rect){margin, motion_y, width, 1}, t.border, 0, (cui_color){0});
-    text_at(e, (cui_rect){margin, motion_y + 8, width, 23}, "Motion", t.font_size, t.text, false, true, false);
-    if (switch_at(e, (cui_rect){margin, motion_y + 34, width, 34}, "Pointer parallax", &e->edit_cfg.parallax, 0, false))
-        e->dirty = true;
-    if (switch_at(e, (cui_rect){margin, motion_y + 69, width, 34}, "Parallax only when desktop is empty",
-                  &e->edit_cfg.parallax_empty, 1, !e->edit_cfg.parallax))
-        e->dirty = true;
-    if (switch_at(e, (cui_rect){margin, motion_y + 104, width, 34}, "Video only when desktop is empty",
-                  &e->edit_cfg.video_empty, 2, false))
-        e->dirty = true;
+    preferences_footer(e, margin, width, "Save settings");
+}
 
-    if (*e->message)
-        text_at(e, (cui_rect){margin, e->h - 55, width - 149, 35}, e->message, t.font_size - 1, t.muted, false, false, false);
-    if (button(e, "save", "Save settings", (cui_rect){e->w - margin - 140, e->h - 54, 140, 36}, CHECK, PRIMARY, false))
-        save_preferences(e);
+static void
+effects(Editor *e)
+{
+    if (!preferences_header(e, "Wallpaper effects")) return;
+    const cui_theme t = e->theme;
+    const float margin = fmaxf(24, (e->w - 580) / 2.0f), width = e->w - 2 * margin;
+    const float blur_y = 78, parallax_y = blur_y + 88, video_y = parallax_y + 90;
+    e->dirty |= switch_at(e, (cui_rect){margin, blur_y, width, 34}, "Wallpaper blur",
+                          &e->edit_cfg.blur, BLUR_SWITCH, false);
+    text_at(e, (cui_rect){margin, blur_y + 34, width, 29}, "Softens the wallpaper behind open windows.",
+            t.font_size - 1, t.muted, false, false, false);
+
+    box(e, (cui_rect){margin, parallax_y - 10, width, 1}, t.border, 0, (cui_color){0});
+    e->dirty |= switch_at(e, (cui_rect){margin, parallax_y, width, 34}, "Pointer parallax",
+                          &e->edit_cfg.parallax, PARALLAX_SWITCH, false);
+    e->dirty |= switch_at(e, (cui_rect){margin + 16, parallax_y + 35, width - 16, 34}, "Only on an empty desktop",
+                          &e->edit_cfg.parallax_empty, PARALLAX_EMPTY_SWITCH, !e->edit_cfg.parallax);
+
+    box(e, (cui_rect){margin, video_y - 10, width, 1}, t.border, 0, (cui_color){0});
+    text_at(e, (cui_rect){margin, video_y, width, 34}, "Video playback", t.font_size, t.text, false, true, false);
+    e->dirty |= switch_at(e, (cui_rect){margin + 16, video_y + 35, width - 16, 34}, "Only on an empty desktop",
+                          &e->edit_cfg.video_empty, VIDEO_EMPTY_SWITCH, false);
+    preferences_footer(e, margin, width, "Save effects");
 }
 
 static bool
@@ -870,7 +914,8 @@ frame(Editor *e, uint64_t now)
     cui_begin_absolute_box(e->ui, 0, (cui_box){.opacity = .60f + .4f * ease, .custom_opacity = t < 1},
                            (cui_rect){0, 3 * (1 - ease), (float)e->w, (float)e->h});
     if (e->screen == BROWSE) browse(e);
-    else preferences(e);
+    else if (e->screen == PREFERENCES) preferences(e);
+    else effects(e);
     cui_end_box(e->ui);
     cui_end_box(e->ui);
     cui_draw_list list = cui_end_frame(e->ui);
@@ -966,7 +1011,7 @@ key_event(Editor *e, XKeyEvent *xkey, bool down)
     KeySym sym = XLookupKeysym(xkey, 0);
     unsigned mod = modifiers(xkey->state);
     if (down && sym == XK_Escape) {
-        if (e->screen == PREFERENCES) navigate(e, BROWSE);
+        if (e->screen != BROWSE) navigate(e, BROWSE);
         else e->finish = true;
         return;
     }
@@ -1179,7 +1224,7 @@ ui_run(const Paths *paths)
         }
         uint64_t now = now_ms();
         double wake_switch = 0;
-        if (e->screen == PREFERENCES) for (size_t i = 0; i < 3; ++i)
+        if (e->screen == EFFECTS) for (size_t i = 0; i < SWITCH_COUNT; ++i)
             if (e->switches[i].next_wake_seconds > 0 &&
                 (!wake_switch || e->switches[i].next_wake_seconds < wake_switch))
                 wake_switch = e->switches[i].next_wake_seconds;
