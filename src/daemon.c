@@ -19,7 +19,7 @@ typedef struct {
     int fd;
     Image frame;
     size_t bytes, progress;
-    double credit;
+    double credit, ramp;
     bool failed;
 } Player;
 
@@ -30,11 +30,11 @@ typedef struct {
     State state;
     Library library;
     Media current;
-    Player player;
-    double dx[MAX_OUTPUTS], dy[MAX_OUTPUTS], parallax_speed[MAX_OUTPUTS], video_speed;
+    Player players[MAX_OUTPUTS];
+    double dx[MAX_OUTPUTS], dy[MAX_OUTPUTS], parallax_speed[MAX_OUTPUTS];
     uint64_t fade_start, layout_due, inspect_at, paint_at, last_tick, retry_at;
     uint32_t occupied;
-    bool drifting, blanked, logged_in, dirty, publish, stop;
+    bool drifting, playing, blanked, logged_in, dirty, publish, stop;
     char notice[ERROR_SIZE];
 } Daemon;
 
@@ -61,24 +61,28 @@ same_layout(const Layout *a, const Layout *b)
 static void
 player_close(Player *p)
 {
-    if (p->fd >= 0) close(p->fd);
+    if (p->pid > 0) close(p->fd);
     child_stop(p->pid);
     image_free(&p->frame);
-    *p = (Player){.fd = -1};
+    *p = (Player){0};
+}
+
+static void
+clear_playback(Daemon *d)
+{
+    for (size_t i = 0; i < MAX_OUTPUTS; ++i) player_close(&d->players[i]);
+    x11_clear_video(&d->x);
+    d->playing = false;
 }
 
 static bool
-player_open(Daemon *d)
+player_open(Daemon *d, size_t i)
 {
-    Player *p = &d->player;
-    if (p->fd >= 0) return true;
-    if (p->failed) return false;
-    int w, h;
-    if (!video_size(&d->cfg, &d->current, &w, &h)) return false;
-    p->bytes = (size_t)w * h * 4;
-    p->frame = (Image){w, h, malloc(p->bytes)};
-    if (p->frame.rgba) p->fd = video_spawn(&d->cfg, &d->current, w, h, &p->pid);
+    Player *p = &d->players[i];
+    if (p->pid > 0) return true;
+    p->fd = video_spawn(&d->cfg, &d->current, &d->x.layout.items[i], &p->frame, &p->pid);
     if (p->fd >= 0) {
+        p->bytes = (size_t)p->frame.w * p->frame.h * 4;
 #ifdef F_SETPIPE_SZ
         (void)fcntl(p->fd, F_SETPIPE_SZ, 1024 * 1024);
 #endif
@@ -86,14 +90,14 @@ player_open(Daemon *d)
     }
     player_close(p);
     p->failed = true;
-    snprintf(d->notice, sizeof d->notice, "Video playback could not start.");
+    snprintf(d->notice, sizeof d->notice, "Video playback could not start on %s.", d->x.layout.items[i].name);
     return false;
 }
 
 static void
-player_read(Daemon *d)
+player_read(Daemon *d, size_t i)
 {
-    Player *p = &d->player;
+    Player *p = &d->players[i];
     while (p->progress < p->bytes) {
         ssize_t n = read(p->fd, p->frame.rgba + p->progress, p->bytes - p->progress);
         if (n > 0) { p->progress += (size_t)n; continue; }
@@ -101,12 +105,10 @@ player_read(Daemon *d)
         if (n < 0 && errno == EAGAIN) return;
         player_close(p);
         p->failed = true;
-        snprintf(d->notice, sizeof d->notice, "Video decoder stopped. The last frame is still visible.");
+        snprintf(d->notice, sizeof d->notice, "Video decoder stopped on %s.", d->x.layout.items[i].name);
         return;
     }
-    if (x11_upload(&d->x, &p->frame, &d->cfg)) d->dirty = true;
-    p->progress = 0;
-    p->credit = fmax(0, p->credit - 1);
+    if (p->credit >= 1) d->paint_at = 0;
 }
 
 static void
@@ -159,8 +161,7 @@ select_media(Daemon *d, Media *media, bool update_state, bool transition, char *
         snprintf(error, ERROR_SIZE, "Could not upload the wallpaper pixels.");
         return false;
     }
-    player_close(&d->player);
-    d->video_speed = 0;
+    clear_playback(d);
     free(d->current.path);
     d->current = *media;
     d->current.path = path;
@@ -265,6 +266,7 @@ reapply(Daemon *d, bool force, char *error)
         snprintf(error, ERROR_SIZE, "The combined monitor arrangement is too large.");
         return false;
     }
+    clear_playback(d);
     d->fade_start = 0;
     d->inspect_at = 0;
     memset(d->dx, 0, sizeof d->dx);
@@ -318,6 +320,48 @@ approach(double value, double target, double dt, int duration)
     return value + (target - value) * ratio;
 }
 
+static double
+video_rate(double ramp)
+{
+    return ramp * ramp * (3 - 2 * ramp);
+}
+
+static bool
+advance_video(Daemon *d, size_t i, double delta, bool active, bool suspended)
+{
+    Player *p = &d->players[i];
+    if (p->failed) return false;
+    if (suspended) {
+        p->ramp = 0;
+        p->credit = 0;
+        return false;
+    }
+    double before = video_rate(p->ramp);
+    int duration = d->cfg.video_ramp_ms;
+    if (!duration) p->ramp = active ? 1 : 0;
+    else p->ramp = fmax(0, fmin(1, p->ramp + (active ? delta : -delta) / duration));
+    if (p->ramp == 0) {
+        p->credit = fmin(p->credit, 0.99);
+        return false;
+    }
+    if (!player_open(d, i)) return false;
+    double rate = video_rate(p->ramp);
+    double average = duration ? (before + rate) / 2 : rate;
+    p->credit = fmin(1.5, p->credit + delta * d->cfg.video_fps * average / 1000);
+    // Keep one decoded frame ready so the ramp can control presentation timing.
+    if (p->credit >= 1 && p->progress == p->bytes) {
+        if (!x11_video_frame(&d->x, i, &p->frame, &d->cfg)) {
+            player_close(p);
+            p->failed = true;
+            snprintf(d->notice, sizeof d->notice, "Could not upload the video frame for %s.", d->x.layout.items[i].name);
+            return false;
+        }
+        p->progress = 0;
+        p->credit -= 1;
+    }
+    return true;
+}
+
 static void
 draw(Daemon *d, uint64_t now, bool force)
 {
@@ -327,22 +371,17 @@ draw(Daemon *d, uint64_t now, bool force)
     const Config *cfg = &d->cfg;
     bool video = d->current.video;
     bool blank = cfg->idle_pause && d->blanked;
-    bool video_active = video && !d->state.inhibited && !blank && (!cfg->video_empty || !d->occupied);
-    bool drift_enabled = cfg->parallax && cfg->travel && !d->state.inhibited && !blank && !video;
-    d->video_speed = blank || d->state.inhibited || !video ? 0 :
-        approach(d->video_speed, video_active ? 1 : 0, delta, cfg->slowdown_ms);
-    if (video && d->video_speed > 0.001 && player_open(d)) {
-        d->player.credit = fmin(1.5, d->player.credit + delta * cfg->video_fps * d->video_speed / 1000);
-        if (d->player.credit >= 1) player_read(d);
-    }
+    bool suspended = blank || d->state.inhibited;
+    bool drift_enabled = cfg->parallax && cfg->travel && !suspended && !video;
     int px = -1, py = -1;
     if (drift_enabled || d->drifting) x11_pointer(&d->x, &px, &py);
-    d->drifting = false;
+    d->drifting = d->playing = false;
     for (size_t i = 0; i < d->x.layout.count; ++i) {
         const Output *o = &d->x.layout.items[i];
         bool occupied = d->occupied & (UINT32_C(1) << i);
+        if (video) d->playing |= advance_video(d, i, delta, !cfg->video_empty || !occupied, suspended);
         bool drift_active = drift_enabled && (!cfg->parallax_empty || !occupied);
-        double speed = blank || d->state.inhibited || video ? 0 :
+        double speed = suspended || video ? 0 :
             approach(d->parallax_speed[i], drift_active ? 1 : 0, delta, cfg->slowdown_ms);
         d->parallax_speed[i] = speed;
         bool inside = px >= o->x && py >= o->y && px < o->x + o->w && py < o->y + o->h;
@@ -374,9 +413,11 @@ draw(Daemon *d, uint64_t now, bool force)
 static void
 status_json(Daemon *d, FILE *out)
 {
-    double parallax_speed = 0;
-    for (size_t i = 0; i < d->x.layout.count; ++i)
+    double parallax_speed = 0, video_speed = 0;
+    for (size_t i = 0; i < d->x.layout.count; ++i) {
         parallax_speed = fmax(parallax_speed, d->parallax_speed[i]);
+        video_speed = fmax(video_speed, video_rate(d->players[i].ramp));
+    }
     fputs("{\"schema\":1,\"wallpaper\":", out);
     if (d->current.path) json_string(out, d->current.path); else fputs("null", out);
     fputs(",\"selection\":", out);
@@ -387,7 +428,7 @@ status_json(Daemon *d, FILE *out)
                  "\"video_speed\":%.3f,\"parallax_speed\":%.3f,\"changed_at\":%lld,\"rotation\":",
             d->state.paused ? "true" : "false", d->state.inhibited ? "true" : "false",
             d->occupied ? "true" : "false", d->blanked ? "true" : "false",
-            d->video_speed, parallax_speed, (long long)d->state.changed);
+            video_speed, parallax_speed, (long long)d->state.changed);
     json_string(out, rotation_names[d->cfg.rotation]);
     fprintf(out, ",\"minutes\":%d,\"outputs\":[", d->cfg.minutes);
     for (size_t i = 0; i < d->x.layout.count; ++i) {
@@ -395,8 +436,10 @@ status_json(Daemon *d, FILE *out)
         if (i) fputc(',', out);
         fputs("{\"name\":", out);
         json_string(out, o->name);
-        fprintf(out, ",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d,\"occupied\":%s,\"parallax_speed\":%.3f}",
-                o->x, o->y, o->w, o->h, d->occupied & (UINT32_C(1) << i) ? "true" : "false", d->parallax_speed[i]);
+        fprintf(out, ",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d,\"occupied\":%s,"
+                     "\"parallax_speed\":%.3f,\"video_speed\":%.3f}",
+                o->x, o->y, o->w, o->h, d->occupied & (UINT32_C(1) << i) ? "true" : "false",
+                d->parallax_speed[i], video_rate(d->players[i].ramp));
     }
     fputs("],\"notice\":", out);
     if (*d->notice) json_string(out, d->notice); else fputs("null", out);
@@ -565,7 +608,7 @@ events(Daemon *d, uint64_t now)
 int
 daemon_run(const Paths *paths, int ready)
 {
-    Daemon d = {.paths = paths, .player = {.fd = -1}};
+    Daemon d = {.paths = paths};
     char error[ERROR_SIZE] = "Could not initialize the wallpaper renderer.";
     int lockfd = -1, server = -1, rc = 1;
     bool owns_socket = false;
@@ -593,29 +636,36 @@ daemon_run(const Paths *paths, int ready)
             if (!reapply(&d, false, error)) snprintf(d.notice, sizeof d.notice, "%s", error);
         }
         if (now >= d.inspect_at) {
-            d.occupied = x11_occupied(&d.x);
-            d.blanked = x11_blanked(&d.x);
+            uint32_t occupied = x11_occupied(&d.x);
+            bool blanked = x11_blanked(&d.x);
+            if (occupied != d.occupied || blanked != d.blanked) d.paint_at = 0;
+            d.occupied = occupied;
+            d.blanked = blanked;
             d.inspect_at = now + 300;
             maintain_rotation(&d, now);
             while (waitpid(-1, NULL, WNOHANG) > 0) {}
         }
         if (now >= d.paint_at || d.dirty) {
             draw(&d, now, false);
-            bool video = d.current.video && d.video_speed > .001 && !d.player.failed;
-            int delay = (video || d.fade_start) ? 12 : d.drifting ? 1000 / d.cfg.parallax_fps : 100;
+            int delay = (d.playing || d.fade_start) ? 12 : d.drifting ? 1000 / d.cfg.parallax_fps : 100;
             d.paint_at = now + (unsigned)delay;
         }
-        bool pending_frame = d.player.fd >= 0 && d.player.credit >= 1 && d.video_speed > .001;
         uint64_t next = d.paint_at < d.inspect_at ? d.paint_at : d.inspect_at;
         if (d.layout_due && d.layout_due < next) next = d.layout_due;
         uint64_t clock = now_ms();
-        struct pollfd p[] = {{server, POLLIN, 0}, {ConnectionNumber(d.x.d), POLLIN, 0},
-                             {pending_frame ? d.player.fd : -1, POLLIN, 0}};
+        struct pollfd p[2 + MAX_OUTPUTS] = {{server, POLLIN, 0}, {ConnectionNumber(d.x.d), POLLIN, 0}};
+        size_t count = d.x.layout.count;
+        for (size_t i = 0; i < count; ++i) {
+            Player *player = &d.players[i];
+            bool pending = player->pid > 0 && player->progress < player->bytes && player->ramp > 0;
+            p[i + 2] = (struct pollfd){pending ? player->fd : -1, POLLIN, 0};
+        }
         if (XPending(d.x.d)) continue;
         int wake = next > clock ? (int)(next - clock) : 0;
-        if (poll(p, 3, wake) > 0) {
+        if (poll(p, 2 + count, wake) > 0) {
             if (p[0].revents & POLLIN) serve(&d, server);
-            if (p[2].revents && d.player.fd == p[2].fd) player_read(&d);
+            for (size_t i = 0; i < count; ++i)
+                if (p[i + 2].revents && d.players[i].pid > 0 && d.players[i].fd == p[i + 2].fd) player_read(&d, i);
         }
     }
     rc = 0;
@@ -625,7 +675,7 @@ done:
     if (server >= 0) close(server);
     if (owns_socket) unlink(paths->socket);
     if (lockfd >= 0) close(lockfd);
-    player_close(&d.player);
+    clear_playback(&d);
     library_free(&d.library);
     free(d.current.path);
     x11_close(&d.x);

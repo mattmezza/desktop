@@ -348,29 +348,22 @@ fit_dimensions(double w, int h, int limit, int *width, int *height)
     *height = (int)fmax(1, round(h * scale));
 }
 
-bool
-video_size(const Config *cfg, const Media *m, int *w, int *h)
-{
-    fit_dimensions(m->w * m->sar, m->h, cfg->video_max, w, h);
-    return dimensions(*w, *h);
-}
-
 static int
-video_output(const Config *cfg, const Media *m, int w, int h, bool loop, pid_t *pid)
+video_output(const Config *cfg, const Media *m, int w, int h, const char *crop, pid_t *pid)
 {
-    char filter[128];
-    if (loop)
-        snprintf(filter, sizeof filter, "fps=%d,scale=%d:%d:flags=bilinear,setsar=1", cfg->video_fps, w, h);
+    char filter[192];
+    if (crop)
+        snprintf(filter, sizeof filter, "fps=%d,%s,scale=%d:%d:flags=bilinear,setsar=1", cfg->video_fps, crop, w, h);
     else snprintf(filter, sizeof filter, "scale=%d:%d:flags=bilinear,setsar=1", w, h);
     char *args[48];
     size_t a = 0;
 #define ARG(x) args[a++] = (char *)(x)
     ARG(cfg->ffmpeg); ARG("-nostdin"); ARG("-v"); ARG("error");
     ARG("-threads"); ARG("2"); ARG("-filter_threads"); ARG("1");
-    if (loop) { ARG("-stream_loop"); ARG("-1"); }
+    if (crop) { ARG("-stream_loop"); ARG("-1"); }
     ARG("-i"); ARG(m->path); ARG("-map"); ARG("0:V:0"); ARG("-an"); ARG("-sn"); ARG("-dn");
     ARG("-vf"); ARG(filter);
-    if (!loop) { ARG("-frames:v"); ARG("1"); }
+    if (!crop) { ARG("-frames:v"); ARG("1"); }
     ARG("-pix_fmt"); ARG("rgba"); ARG("-c:v"); ARG("rawvideo"); ARG("-threads"); ARG("1");
     ARG("-f"); ARG("rawvideo"); ARG("pipe:1"); ARG(NULL);
 #undef ARG
@@ -378,9 +371,22 @@ video_output(const Config *cfg, const Media *m, int w, int h, bool loop, pid_t *
 }
 
 int
-video_spawn(const Config *cfg, const Media *m, int w, int h, pid_t *pid)
+video_spawn(const Config *cfg, const Media *m, const Output *o, Image *frame, pid_t *pid)
 {
-    return video_output(cfg, m, w, h, true, pid);
+    double left, top, width, height;
+    media_crop(cfg, m, o->w, o->h, &left, &top, &width, &height);
+    int x = (int)fmin(m->w - 1, fmax(0, round(left / m->sar)));
+    int y = (int)fmin(m->h - 1, fmax(0, round(top)));
+    int right = (int)fmax(x + 1, fmin(m->w, round((left + width) / m->sar)));
+    int bottom = (int)fmax(y + 1, fmin(m->h, round(top + height)));
+    char crop[80];
+    snprintf(crop, sizeof crop, "crop=%d:%d:%d:%d:exact=1", right - x, bottom - y, x, y);
+    int w, h;
+    fit_dimensions(o->w, o->h, cfg->video_max, &w, &h);
+    if (!image_alloc(frame, w, h)) return -1;
+    int fd = video_output(cfg, m, w, h, crop, pid);
+    if (fd < 0) image_free(frame);
+    return fd;
 }
 
 static bool
@@ -413,7 +419,7 @@ media_decode(const Config *cfg, const Media *m, int max, Image *out, char *error
         fit_dimensions(m->w * m->sar, m->h, max ? max : cfg->video_max, &w, &h);
         if (image_alloc(out, w, h)) {
             pid_t pid;
-            int fd = video_output(cfg, m, w, h, false, &pid);
+            int fd = video_output(cfg, m, w, h, NULL, &pid);
             if (fd >= 0) {
                 size_t bytes = (size_t)w * h * 4;
                 ok = read_until(fd, out->rgba, bytes, 8000) == bytes;

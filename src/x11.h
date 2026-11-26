@@ -7,7 +7,15 @@
 #include <X11/extensions/XShm.h>
 
 typedef struct {
-    Pixmap still;
+    XImage *image;
+    XShmSegmentInfo segment;
+    bool attached;
+} Upload;
+
+typedef struct {
+    Pixmap still, frame;
+    Picture frame_pic;
+    Upload upload;
     int dx, dy;
 } Viewport;
 
@@ -23,11 +31,10 @@ typedef struct {
     Layout layout;
     Pixmap canvas, snapshot, former, source;
     Picture canvas_pic, former_pic, source_pic;
-    XImage *upload;
-    XShmSegmentInfo segment;
-    bool attached;
+    Upload upload;
     int source_w, source_h, canvas_w, canvas_h;
     Viewport viewports[MAX_OUTPUTS];
+    uint32_t video_updates;
     bool live_mapped, crops_valid, overlaps;
 } X11;
 
@@ -36,6 +43,8 @@ void x11_close(X11 *);
 bool x11_layout(X11 *, Layout *);
 bool x11_scene(X11 *, const Layout *, const Config *);
 bool x11_upload(X11 *, const Image *, const Config *);
+bool x11_video_frame(X11 *, size_t, const Image *, const Config *);
+void x11_clear_video(X11 *);
 void x11_capture(X11 *);
 void x11_paint(X11 *, const Config *, const Media *, const double *, const double *, double, bool);
 void x11_publish(X11 *);

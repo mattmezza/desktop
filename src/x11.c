@@ -65,25 +65,40 @@ x11_open(X11 *x, char *error)
 }
 
 static void
-drop_upload(X11 *x)
+drop_upload(Display *d, Upload *upload)
 {
-    if (x->upload) {
-        if (x->attached) {
-            XShmDetach(x->d, &x->segment);
-            x->upload->data = NULL;
-            shmdt(x->segment.shmaddr);
+    if (upload->image) {
+        if (upload->attached) {
+            XShmDetach(d, &upload->segment);
+            upload->image->data = NULL;
+            shmdt(upload->segment.shmaddr);
         }
-        XDestroyImage(x->upload);
+        XDestroyImage(upload->image);
     }
-    x->attached = false;
-    x->upload = NULL;
+    *upload = (Upload){0};
+}
+
+void
+x11_clear_video(X11 *x)
+{
+    if (!x->d) return;
+    for (size_t i = 0; i < MAX_OUTPUTS; ++i) {
+        Viewport *v = &x->viewports[i];
+        if (v->frame_pic) XRenderFreePicture(x->d, v->frame_pic);
+        if (v->frame) XFreePixmap(x->d, v->frame);
+        drop_upload(x->d, &v->upload);
+        v->frame_pic = None;
+        v->frame = None;
+    }
+    x->video_updates = 0;
 }
 
 void
 x11_close(X11 *x)
 {
     if (!x->d) return;
-    drop_upload(x);
+    x11_clear_video(x);
+    drop_upload(x->d, &x->upload);
     if (x11_owns_background(x)) {
         XDeleteProperty(x->d, x->root, x->rootmap);
         XDeleteProperty(x->d, x->root, x->esetroot);
@@ -205,42 +220,43 @@ x11_scene(X11 *x, const Layout *layout, const Config *cfg)
 }
 
 static bool
-setup_upload(X11 *x, int w, int h)
+setup_upload(X11 *x, Upload *upload, int w, int h)
 {
-    drop_upload(x);
+    Display *d = x->d;
+    drop_upload(d, upload);
     if (x->shm) {
-        XShmSegmentInfo *s = &x->segment;
-        x->upload = XShmCreateImage(x->d, x->visual, (unsigned)x->depth, ZPixmap, NULL, s,
-                                    (unsigned)w, (unsigned)h);
-        if (x->upload) {
-            s->shmid = shmget(IPC_PRIVATE, (size_t)x->upload->bytes_per_line * h, IPC_CREAT | 0600);
+        XShmSegmentInfo *s = &upload->segment;
+        upload->image = XShmCreateImage(d, x->visual, (unsigned)x->depth, ZPixmap, NULL, s,
+                                         (unsigned)w, (unsigned)h);
+        if (upload->image) {
+            s->shmid = shmget(IPC_PRIVATE, (size_t)upload->image->bytes_per_line * h, IPC_CREAT | 0600);
             if (s->shmid >= 0) {
                 s->shmaddr = shmat(s->shmid, NULL, 0);
                 if (s->shmaddr != (void *)-1) {
-                    x->upload->data = s->shmaddr;
+                    upload->image->data = s->shmaddr;
                     s->readOnly = True;
-                    XSync(x->d, False);
+                    XSync(d, False);
                     x_error = 0;
-                    x->attached = XShmAttach(x->d, s) != False;
-                    XSync(x->d, False);
-                    x->attached = x->attached && !x_error;
-                    if (!x->attached) {
-                        x->upload->data = NULL;
+                    upload->attached = XShmAttach(d, s) != False;
+                    XSync(d, False);
+                    upload->attached = upload->attached && !x_error;
+                    if (!upload->attached) {
+                        upload->image->data = NULL;
                         shmdt(s->shmaddr);
                     }
                 }
                 shmctl(s->shmid, IPC_RMID, NULL);
             }
         }
-        if (x->attached) return true;
-        drop_upload(x);
+        if (upload->attached) return true;
+        drop_upload(d, upload);
         x->shm = false;
     }
-    x->upload = XCreateImage(x->d, x->visual, (unsigned)x->depth, ZPixmap, 0, NULL,
+    upload->image = XCreateImage(d, x->visual, (unsigned)x->depth, ZPixmap, 0, NULL,
                              (unsigned)w, (unsigned)h, 32, 0);
-    if (!x->upload) return false;
-    x->upload->data = malloc((size_t)x->upload->bytes_per_line * h);
-    if (!x->upload->data) { drop_upload(x); return false; }
+    if (!upload->image) return false;
+    upload->image->data = malloc((size_t)upload->image->bytes_per_line * h);
+    if (!upload->image->data) { drop_upload(d, upload); return false; }
     return true;
 }
 
@@ -252,14 +268,11 @@ channel(unsigned c, unsigned long mask)
     return ((c * (mask >> shift) + 127) / 255) << shift;
 }
 
-bool
-x11_upload(X11 *x, const Image *image, const Config *cfg)
+static void
+upload_pixels(X11 *x, Upload *upload, Pixmap target, const Image *image, const Config *cfg)
 {
     int w = image->w, h = image->h;
-    if (w > 32767 || h > 32767) return false;
-    if (!x->upload || x->upload->width != w || x->upload->height != h)
-        if (!setup_upload(x, w, h)) return false;
-    XImage *dst = x->upload;
+    XImage *dst = upload->image;
     unsigned bg = (unsigned)strtoul(cfg->background + (*cfg->background == '#'), NULL, 16);
     bool native = dst->bits_per_pixel == 32 && dst->byte_order == LSBFirst &&
                   dst->red_mask == 0xff0000 && dst->green_mask == 0xff00 && dst->blue_mask == 0xff;
@@ -281,6 +294,19 @@ x11_upload(X11 *x, const Image *image, const Config *cfg)
             } else XPutPixel(dst, i, y, channel(r, dst->red_mask) | channel(g, dst->green_mask) | channel(b, dst->blue_mask));
         }
     }
+    if (upload->attached) {
+        XShmPutImage(x->d, target, x->gc, dst, 0, 0, 0, 0, (unsigned)w, (unsigned)h, False);
+        XSync(x->d, False);
+    } else XPutImage(x->d, target, x->gc, dst, 0, 0, 0, 0, (unsigned)w, (unsigned)h);
+}
+
+bool
+x11_upload(X11 *x, const Image *image, const Config *cfg)
+{
+    int w = image->w, h = image->h;
+    if (w > 32767 || h > 32767) return false;
+    if (!x->upload.image || x->upload.image->width != w || x->upload.image->height != h)
+        if (!setup_upload(x, &x->upload, w, h)) return false;
     Display *d = x->d;
     if (!x->source || x->source_w != w || x->source_h != h) {
         if (x->source_pic) XRenderFreePicture(d, x->source_pic);
@@ -292,11 +318,33 @@ x11_upload(X11 *x, const Image *image, const Config *cfg)
         x->source_w = w;
         x->source_h = h;
     }
-    if (x->attached) {
-        XShmPutImage(d, x->source, x->gc, dst, 0, 0, 0, 0, (unsigned)w, (unsigned)h, False);
-        XSync(d, False);
-    } else XPutImage(d, x->source, x->gc, dst, 0, 0, 0, 0, (unsigned)w, (unsigned)h);
+    upload_pixels(x, &x->upload, x->source, image, cfg);
     x->crops_valid = false;
+    return true;
+}
+
+bool
+x11_video_frame(X11 *x, size_t i, const Image *image, const Config *cfg)
+{
+    Display *d = x->d;
+    Viewport *v = &x->viewports[i];
+    const Output *o = &x->layout.items[i];
+    int w = image->w, h = image->h;
+    if (!v->frame) {
+        if (!setup_upload(x, &v->upload, w, h)) return false;
+        v->frame = XCreatePixmap(d, x->root, (unsigned)w, (unsigned)h, (unsigned)x->depth);
+        if (w != o->w || h != o->h) {
+            XRenderPictureAttributes pa = {.repeat = RepeatPad};
+            v->frame_pic = XRenderCreatePicture(d, v->frame, x->format, CPRepeat, &pa);
+            XTransform transform = {{{XDoubleToFixed(w / (double)o->w), 0, 0},
+                                     {0, XDoubleToFixed(h / (double)o->h), 0},
+                                     {0, 0, XDoubleToFixed(1)}}};
+            XRenderSetPictureTransform(d, v->frame_pic, &transform);
+            XRenderSetPictureFilter(d, v->frame_pic, FilterBilinear, NULL, 0);
+        }
+    }
+    upload_pixels(x, &v->upload, v->frame, image, cfg);
+    x->video_updates |= UINT32_C(1) << i;
     return true;
 }
 
@@ -358,26 +406,34 @@ x11_paint(X11 *x, const Config *cfg, const Media *media, const double *dx,
     }
     if (full) fill(x, x->canvas, cfg);
     int left = l->w, top = l->h, right = 0, bottom = 0;
+    uint32_t updates = x->video_updates;
+    x->video_updates = 0;
     for (size_t i = 0; i < l->count; ++i) {
         const Output *o = &l->items[i];
         Viewport *v = &x->viewports[i];
-        if (!full && (!v->still || (lround(dx[i]) == v->dx && lround(dy[i]) == v->dy))) continue;
-        if (o->x < left) left = o->x;
-        if (o->y < top) top = o->y;
-        if (o->x + o->w > right) right = o->x + o->w;
-        if (o->y + o->h > bottom) bottom = o->y + o->h;
+        if (v->still && (lround(dx[i]) != v->dx || lround(dy[i]) != v->dy)) updates |= UINT32_C(1) << i;
+        if (updates & (UINT32_C(1) << i)) {
+            if (o->x < left) left = o->x;
+            if (o->y < top) top = o->y;
+            if (o->x + o->w > right) right = o->x + o->w;
+            if (o->y + o->h > bottom) bottom = o->y + o->h;
+        }
     }
     if (!full && (left >= right || top >= bottom)) return;
     for (size_t i = 0; i < l->count; ++i) {
         const Output *o = &l->items[i];
         Viewport *v = &x->viewports[i];
         int offset_x = (int)lround(dx[i]), offset_y = (int)lround(dy[i]);
-        if (!full && !x->overlaps && offset_x == v->dx && offset_y == v->dy) continue;
+        if (!full && !x->overlaps && !(updates & (UINT32_C(1) << i))) continue;
         v->dx = offset_x;
         v->dy = offset_y;
         // Sample each still once at output resolution so fine details stay stable during motion.
-        if (v->still) XCopyArea(d, v->still, x->canvas, x->gc, padding + offset_x, padding + offset_y,
-                               (unsigned)o->w, (unsigned)o->h, o->x, o->y);
+        if (v->frame_pic) XRenderComposite(d, PictOpSrc, v->frame_pic, None, x->canvas_pic, 0, 0, 0, 0,
+                                           o->x, o->y, (unsigned)o->w, (unsigned)o->h);
+        else if (v->frame) XCopyArea(d, v->frame, x->canvas, x->gc, 0, 0,
+                                    (unsigned)o->w, (unsigned)o->h, o->x, o->y);
+        else if (v->still) XCopyArea(d, v->still, x->canvas, x->gc, padding + offset_x, padding + offset_y,
+                                    (unsigned)o->w, (unsigned)o->h, o->x, o->y);
         else render_crop(x, x->canvas_pic, cfg, media, o, o->x, o->y, 0);
     }
     if (fade > 0 && x->former_pic) {

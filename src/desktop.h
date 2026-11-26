@@ -32,6 +32,7 @@
     OPTION(INT, ease_ms, "parallax", "ease_ms", 180, 0, 2000) \
     OPTION(INT, parallax_fps, "parallax", "fps", 30, 1, 60) \
     OPTION(BOOL, video_empty, "video", "empty_only", true, 0, 1) \
+    OPTION(INT, video_ramp_ms, "video", "ramp_ms", 1000, 0, 5000) \
     OPTION(INT, video_fps, "video", "fps", 24, 1, 60) \
     OPTION(INT, video_max, "video", "max_dimension", 3840, 640, 8192) \
     OPTION(PATH, ffmpeg, "video", "ffmpeg", "desktop-ffmpeg", 0, 0) \
@@ -132,8 +133,7 @@ bool library_read(const Config *, Library *, char *);
 void library_free(Library *);
 bool media_eligible(const Config *, const Layout *, const Media *, char *);
 void media_crop(const Config *, const Media *, int, int, double *, double *, double *, double *);
-bool video_size(const Config *, const Media *, int *, int *);
-int video_spawn(const Config *, const Media *, int, int, pid_t *);
+int video_spawn(const Config *, const Media *, const Output *, Image *, pid_t *);
 void child_stop(pid_t);
 bool hook_run(const char *, const char *, const char *, bool);
 

@@ -188,10 +188,40 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         until(lambda: x.read(300, 400) != p)
         x.map(x.d, window)
         x.sync(x.d, 0)
+        until(lambda: status()["occupied"] and .15 < status()["video_speed"] < .85)
         until(lambda: status()["occupied"] and status()["video_speed"] < .01)
         p = x.read(300, 400)
         time.sleep(.35)
         assert x.read(300, 400) == p
+        if not wm:
+            x.unmap(x.d, window)
+            x.sync(x.d, 0)
+            run("xrandr", "--setmonitor", "Wide", "1440/380x480/127+0+0", "screen")
+            run("xrandr", "--setmonitor", "Laptop", "900/238x420/111+120+480", "none")
+            desktop("reapply")
+            until(lambda: output("Wide")["video_speed"] > .99 and output("Laptop")["video_speed"] > .99)
+            x.map(x.d, window)
+            x.sync(x.d, 0)
+            until(lambda: output("Wide")["occupied"] and .15 < output("Wide")["video_speed"] < .85)
+            until(lambda: output("Wide")["video_speed"] == 0)
+            assert output("Laptop")["video_speed"] > .99
+
+            def pixels(y):
+                return tuple(x.read(px, y + py) for px in (250, 330, 440, 600, 770) for py in (0, 25, 50))
+
+            frozen, moving = pixels(350), pixels(710)
+            until(lambda: pixels(710) != moving)
+            assert pixels(350) == frozen
+            x.unmap(x.d, window)
+            x.sync(x.d, 0)
+            until(lambda: not output("Wide")["occupied"] and .15 < output("Wide")["video_speed"] < .85)
+            until(lambda: pixels(350) != frozen)
+            assert output("Laptop")["video_speed"] > .99
+            run("xrandr", "--delmonitor", "Laptop")
+            run("xrandr", "--delmonitor", "Wide")
+            desktop("reapply")
+            x.map(x.d, window)
+            x.sync(x.d, 0)
         desktop("config", "set", "video.empty_only", "false")
         until(lambda: status()["occupied"] and status()["video_speed"] > .9)
         desktop("inhibit")

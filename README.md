@@ -57,7 +57,7 @@ Copy [config.ini](config.ini) to `${XDG_CONFIG_HOME:-$HOME/.config}/desktop/conf
 
 Empty theme values inherit `desktop.*` Xresources, the mwm palette, then the bundled defaults. Use `desktop.background`, `desktop.panel`, `desktop.foreground`, `desktop.muted`, `desktop.border`, `desktop.accent`, `desktop.onAccent`, `desktop.cornerRadius`, `desktop.font`, or `desktop.mono`. Explicit INI values take priority. The bundled fonts are Geist and Geist Mono.
 
-With **Parallax only when desktop is empty** enabled, motion returns to the neutral crop on each output that shows an application window. Other outputs can continue reacting to the pointer. On mwm, windows on hidden tags are off-screen and count as hidden. With **Video only when desktop is empty** enabled, a visible application window on any output eases the video to a stop on its last frame. Desktop observes X11 blanking and DPMS. A locker can also explicitly inhibit motion for its lifetime.
+With **Parallax only when desktop is empty** enabled, motion returns to the neutral crop on each output that shows an application window. With **Video only when desktop is empty** enabled, playback eases to a stop on each occupied output and gradually resumes from the held frame when that output is empty. Adjust the one-second transition with `video.ramp_ms`. On mwm, windows on hidden tags are off-screen and count as hidden. Desktop observes X11 blanking and DPMS. A locker can also explicitly inhibit motion for its lifetime.
 
 ```sh
 desktop status --json
