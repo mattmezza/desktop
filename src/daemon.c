@@ -181,8 +181,6 @@ select_media(Daemon *d, Media *media, bool update_state, bool transition, char *
     d->fade_start = fade ? now_ms() : 0;
     d->dirty = d->publish = true;
     d->notice[0] = '\0';
-    if (d->cfg.blur && d->cfg.blur_radius && !d->x.convolution)
-        snprintf(d->notice, sizeof d->notice, "This X11 display does not support wallpaper blur.");
     if (update_state) {
         strcpy(d->state.path, path);
         d->state.changed = time(NULL);
@@ -401,7 +399,7 @@ static bool
 advance_blur(Daemon *d, size_t i, double delta, bool occupied, bool suspended)
 {
     const Config *cfg = &d->cfg;
-    bool enabled = cfg->blur && cfg->blur_radius && d->x.convolution;
+    bool enabled = cfg->blur && cfg->blur_radius;
     occupied &= enabled;
     double target = occupied ? 1 : 0;
     BlurTransition *b = &d->blur[i];

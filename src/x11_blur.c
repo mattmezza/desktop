@@ -1,6 +1,8 @@
 #include "x11.h"
 #include <math.h>
 
+static const int radii[BLUR_LEVELS] = {4, 6, 9, 13, 18, 26, 37, 52, 74, 96};
+
 static Picture
 picture(X11 *x, Pixmap pixmap)
 {
@@ -16,6 +18,9 @@ x11_blur_clear(X11 *x, WallpaperBlur *b)
         if (b->downsample[i].picture) XRenderFreePicture(x->d, b->downsample[i].picture);
     if (b->pass.picture) XRenderFreePicture(x->d, b->pass.picture);
     if (b->result.picture) XRenderFreePicture(x->d, b->result.picture);
+    if (b->mix.picture) XRenderFreePicture(x->d, b->mix.picture);
+    for (size_t i = 0; i < BLUR_LEVELS; ++i)
+        if (b->levels[i].picture) XRenderFreePicture(x->d, b->levels[i].picture);
     *b = (WallpaperBlur){0};
 }
 
@@ -40,24 +45,44 @@ scale(X11 *x, BlurImage image, int w, int h)
 }
 
 static void
+composite(X11 *x, BlurImage from, BlurImage to, Picture mask)
+{
+    XRenderComposite(x->d, mask ? PictOpOver : PictOpSrc, from.picture, mask, to.picture, 0, 0, 0, 0,
+                     0, 0, (unsigned)to.w, (unsigned)to.h);
+}
+
+static Picture
+opacity(X11 *x, double fraction)
+{
+    XRenderColor color = {.alpha = (unsigned short)lround(65535 * fraction)};
+    return XRenderCreateSolidFill(x->d, &color);
+}
+
+static void
 gaussian(X11 *x, BlurImage from, BlurImage to, double sigma, bool horizontal)
 {
-    enum { MAX_TAPS = 12 };
-    int extent = (int)fmin(MAX_TAPS, ceil(3 * sigma)), width = 2 * extent + 1;
-    double weights[2 * MAX_TAPS + 1], total = 0;
-    for (int i = -extent; i <= extent; ++i) {
-        double distance = i / sigma;
-        total += weights[i + extent] = exp(-.5 * distance * distance);
+    int extent = (int)fmin(12, ceil(3 * sigma));
+    XFixed unit = XDoubleToFixed(1);
+    XTransform transform = {{{unit, 0, 0}, {0, unit, 0}, {0, 0, unit}}};
+    XRenderSetPictureFilter(x->d, from.picture, FilterBilinear, NULL, 0);
+    XRenderSetPictureTransform(x->d, from.picture, &transform);
+    composite(x, from, to, None);
+    double total = 1, exponent = -.5 / (sigma * sigma);
+    for (int i = 1; i <= extent; i += 2) {
+        double a = exp(exponent * i * i);
+        double b = i < extent ? exp(exponent * (i + 1) * (i + 1)) : 0;
+        double weight = a + b;
+        // Sample two neighboring taps at their weighted position using one bilinear lookup.
+        double distance = i + b / weight;
+        for (int direction = -1; direction <= 1; direction += 2) {
+            total += weight;
+            Picture mask = opacity(x, weight / total);
+            transform.matrix[horizontal ? 0 : 1][2] = XDoubleToFixed(direction * distance);
+            XRenderSetPictureTransform(x->d, from.picture, &transform);
+            composite(x, from, to, mask);
+            XRenderFreePicture(x->d, mask);
+        }
     }
-    XFixed params[2 + 2 * MAX_TAPS + 1] = {XDoubleToFixed(horizontal ? width : 1),
-                                            XDoubleToFixed(horizontal ? 1 : width)};
-    XFixed sum = 0;
-    for (int i = 0; i < width; ++i) sum += params[i + 2] = XDoubleToFixed(weights[i] / total);
-    params[extent + 2] += XDoubleToFixed(1) - sum;
-    scale(x, from, to.w, to.h);
-    XRenderSetPictureFilter(x->d, from.picture, FilterConvolution, params, width + 2);
-    XRenderComposite(x->d, PictOpSrc, from.picture, None, to.picture, 0, 0, 0, 0,
-                     0, 0, (unsigned)to.w, (unsigned)to.h);
 }
 
 static BlurImage
@@ -71,18 +96,16 @@ downsample(X11 *x, WallpaperBlur *b, int w, int h, size_t level)
         int tw = (w + divisor - 1) / divisor, th = (h + divisor - 1) / divisor;
         resize(x, to, tw < from.w ? tw : from.w, th < from.h ? th : from.h);
         scale(x, from, to->w, to->h);
-        XRenderComposite(x->d, PictOpSrc, from.picture, None, to->picture, 0, 0, 0, 0,
-                         0, 0, (unsigned)to->w, (unsigned)to->h);
+        composite(x, from, *to, None);
         b->sampled = i + 1;
     }
     return b->downsample[level];
 }
 
-bool
-x11_blur_paint(X11 *x, Viewport *v, const Output *o, int sx, int sy, int w, int h)
+static WallpaperBlur *
+blur_source(X11 *x, Viewport *v, int w, int h)
 {
     Pixmap pixmap = v->frame ? v->frame : v->still;
-    if (!x->convolution || !pixmap) return false;
     WallpaperBlur *b = &v->blur;
     if (pixmap != b->drawable) {
         x11_blur_clear(x, b);
@@ -90,29 +113,74 @@ x11_blur_paint(X11 *x, Viewport *v, const Output *o, int sx, int sy, int w, int 
         b->source = (BlurImage){picture(x, pixmap), v->frame ? v->upload.image->width : w,
                                                   v->frame ? v->upload.image->height : h};
     }
-    // Blend the lightest blur into the native crop so the last step resolves to exact pixels.
-    int radius = v->blur_radius < BLUR_MIN_RADIUS ? BLUR_MIN_RADIUS : v->blur_radius;
-    if (radius != b->filtered_radius) {
-        double sigma = radius / (double)BLUR_PRECISION;
-        size_t level = 1;
-        while (level + 1 < sizeof b->downsample / sizeof *b->downsample && sigma >= (double)(5 << level)) ++level;
-        BlurImage from = downsample(x, b, w, h, level);
-        resize(x, &b->pass, from.w, from.h);
+    return b;
+}
+
+static BlurImage
+blur_level(X11 *x, WallpaperBlur *b, int w, int h, size_t index, double sigma)
+{
+    BlurImage *output = &b->levels[index];
+    if (b->cached & (1u << index)) return *output;
+    size_t level = 1;
+    while (level + 1 < sizeof b->downsample / sizeof *b->downsample && sigma >= (double)(5 << level)) ++level;
+    BlurImage from = downsample(x, b, w, h, level);
+    // Store all levels at the same resolution so blending across a level boundary is continuous.
+    resize(x, output, b->downsample[1].w, b->downsample[1].h);
+    resize(x, &b->pass, from.w, from.h);
+    BlurImage target = *output;
+    if (level > 1) {
         resize(x, &b->result, from.w, from.h);
-        // Downsampling and bilinear reconstruction already contribute some blur.
-        double sx_sigma = sigma * from.w / w, sy_sigma = sigma * from.h / h;
-        gaussian(x, from, b->pass, sqrt(fmax(.25, sx_sigma * sx_sigma - .25)), true);
-        gaussian(x, b->pass, b->result, sqrt(fmax(.25, sy_sigma * sy_sigma - .25)), false);
-        scale(x, b->result, w, h);
-        b->filtered_radius = radius;
+        target = b->result;
     }
-    Picture mask = None;
-    if (v->blur_radius < BLUR_MIN_RADIUS) {
-        XRenderColor alpha = {.alpha = (unsigned short)(65535 * v->blur_radius / BLUR_MIN_RADIUS)};
-        mask = XRenderCreateSolidFill(x->d, &alpha);
+    // Downsampling and bilinear reconstruction already contribute some blur.
+    double sx_sigma = sigma * from.w / w, sy_sigma = sigma * from.h / h;
+    gaussian(x, from, b->pass, sqrt(fmax(.25, sx_sigma * sx_sigma - .25)), true);
+    gaussian(x, b->pass, target, sqrt(fmax(.25, sy_sigma * sy_sigma - .25)), false);
+    if (level > 1) {
+        scale(x, target, output->w, output->h);
+        composite(x, target, *output, None);
     }
-    XRenderComposite(x->d, mask ? PictOpOver : PictOpSrc, b->result.picture, mask, x->canvas_pic,
+    b->cached |= 1u << index;
+    return *output;
+}
+
+void
+x11_blur_prepare(X11 *x, Viewport *v, int w, int h, int maximum)
+{
+    WallpaperBlur *b = blur_source(x, v, w, h);
+    int limit = maximum < radii[0] ? radii[0] : maximum;
+    for (size_t i = 0; i < BLUR_LEVELS; ++i) {
+        blur_level(x, b, w, h, i, fmin(radii[i], limit));
+        if (radii[i] >= limit) break;
+    }
+}
+
+void
+x11_blur_paint(X11 *x, Viewport *v, const Output *o, int sx, int sy, int w, int h, int maximum)
+{
+    WallpaperBlur *b = blur_source(x, v, w, h);
+    double radius = v->blur_radius / (double)BLUR_PRECISION;
+    int limit = maximum < radii[0] ? radii[0] : maximum;
+    size_t upper = 0;
+    while (upper + 1 < BLUR_LEVELS && radius > radii[upper]) ++upper;
+    double high = fmin(radii[upper], limit);
+    BlurImage output = blur_level(x, b, w, h, upper, high);
+    if (upper && radius < high) {
+        double low = radii[upper - 1];
+        BlurImage lighter = blur_level(x, b, w, h, upper - 1, low);
+        resize(x, &b->mix, output.w, output.h);
+        scale(x, lighter, output.w, output.h);
+        scale(x, output, output.w, output.h);
+        Picture mask = opacity(x, (radius * radius - low * low) / (high * high - low * low));
+        composite(x, lighter, b->mix, None);
+        composite(x, output, b->mix, mask);
+        XRenderFreePicture(x->d, mask);
+        output = b->mix;
+    }
+    scale(x, output, w, h);
+    // Blend the lightest blur into the native crop so the last step resolves to exact pixels.
+    Picture mask = radius < radii[0] ? opacity(x, radius / radii[0]) : None;
+    XRenderComposite(x->d, mask ? PictOpOver : PictOpSrc, output.picture, mask, x->canvas_pic,
                      sx, sy, 0, 0, o->x, o->y, (unsigned)o->w, (unsigned)o->h);
     if (mask) XRenderFreePicture(x->d, mask);
-    return true;
 }

@@ -17,14 +17,14 @@ typedef struct {
     int w, h;
 } BlurImage;
 
+enum { BLUR_LEVELS = 10, BLUR_PRECISION = 32, BLUR_MIN_RADIUS = 4 * BLUR_PRECISION };
+
 typedef struct {
     Pixmap drawable;
-    BlurImage source, downsample[5], pass, result;
+    BlurImage source, downsample[5], pass, result, mix, levels[BLUR_LEVELS];
     size_t sampled;
-    int filtered_radius;
+    unsigned cached;
 } WallpaperBlur;
-
-enum { BLUR_PRECISION = 32, BLUR_MIN_RADIUS = 4 * BLUR_PRECISION };
 
 typedef struct {
     Pixmap still, frame;
@@ -37,7 +37,7 @@ typedef struct {
 typedef struct {
     Display *d;
     int screen, depth, randr_event;
-    bool randr, saver, dpms, shm, convolution;
+    bool randr, saver, dpms, shm;
     Window root, live;
     Atom rootmap, esetroot, clients, type, dock, desktop;
     Visual *visual;
@@ -70,5 +70,6 @@ bool x11_blanked(X11 *);
 bool x11_layout_event(const X11 *, const XEvent *);
 void x11_window_class(Display *, Window, const char *, const char *);
 void x11_blur_clear(X11 *, WallpaperBlur *);
-bool x11_blur_paint(X11 *, Viewport *, const Output *, int, int, int, int);
+void x11_blur_prepare(X11 *, Viewport *, int, int, int);
+void x11_blur_paint(X11 *, Viewport *, const Output *, int, int, int, int, int);
 #endif
