@@ -12,7 +12,7 @@ Install or upgrade the latest release for Linux x86-64 or ARM64.
 curl -fsSL https://raw.githubusercontent.com/mattmezza/desktop/main/install.sh | sh
 ```
 
-The installer verifies the release checksum and installs into `~/.local` by default. Set `PREFIX` to install elsewhere, or `DESKTOP_VERSION=v0.1.1` to pin a release. Put the installation's `bin` directory on your PATH. The archive includes static Desktop, FFmpeg, and FFprobe executables. It preserves existing configuration on upgrades.
+The installer verifies the release checksum and installs into `~/.local` by default. Set `PREFIX` to install elsewhere, or `DESKTOP_VERSION=v0.1.2` to pin a release. Put the installation's `bin` directory on your PATH. The archive includes static Desktop, FFmpeg, and FFprobe executables. It preserves existing configuration on upgrades.
 
 For a source build, install a C toolchain, pkg-config, Xlib, XRandR, XRender, XFixes, Xext, XScreenSaver, FreeType, HarfBuzz, libpng, libjpeg-turbo, and libwebp development files. CUI and the Geist faces are bundled. Use `ffmpeg` and `ffprobe` from PATH for video.
 
@@ -57,7 +57,7 @@ Copy [config.ini](config.ini) to `${XDG_CONFIG_HOME:-$HOME/.config}/desktop/conf
 
 Empty theme values inherit `desktop.*` Xresources, the mwm palette, then the bundled defaults. Use `desktop.background`, `desktop.panel`, `desktop.foreground`, `desktop.muted`, `desktop.border`, `desktop.accent`, `desktop.onAccent`, `desktop.cornerRadius`, `desktop.font`, or `desktop.mono`. Explicit INI values take priority. The bundled fonts are Geist and Geist Mono.
 
-When enabled for an effect, **only when desktop is empty** eases it to a stop when an application window becomes visible on any active output. On mwm, clients on hidden tags are off-screen and count as hidden. Video freezes on its last frame and resumes from there. Pointer parallax returns to the neutral crop. Desktop observes X11 blanking and DPMS. A locker can also explicitly inhibit motion for its lifetime.
+With **Parallax only when desktop is empty** enabled, motion returns to the neutral crop on each output that shows an application window. Other outputs can continue reacting to the pointer. On mwm, windows on hidden tags are off-screen and count as hidden. With **Video only when desktop is empty** enabled, a visible application window on any output eases the video to a stop on its last frame. Desktop observes X11 blanking and DPMS. A locker can also explicitly inhibit motion for its lifetime.
 
 ```sh
 desktop status --json

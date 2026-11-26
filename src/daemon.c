@@ -31,9 +31,10 @@ typedef struct {
     Library library;
     Media current;
     Player player;
-    double dx[MAX_OUTPUTS], dy[MAX_OUTPUTS], video_speed, parallax_speed;
+    double dx[MAX_OUTPUTS], dy[MAX_OUTPUTS], parallax_speed[MAX_OUTPUTS], video_speed;
     uint64_t fade_start, layout_due, inspect_at, paint_at, last_tick, retry_at;
-    bool occupied, blanked, logged_in, dirty, publish, stop;
+    uint32_t occupied;
+    bool drifting, blanked, logged_in, dirty, publish, stop;
     char notice[ERROR_SIZE];
 } Daemon;
 
@@ -265,8 +266,10 @@ reapply(Daemon *d, bool force, char *error)
         return false;
     }
     d->fade_start = 0;
+    d->inspect_at = 0;
     memset(d->dx, 0, sizeof d->dx);
     memset(d->dy, 0, sizeof d->dy);
+    memset(d->parallax_speed, 0, sizeof d->parallax_speed);
     const char *wanted = *d->state.path ? d->state.path : d->current.path;
     if (wanted && d->current.path && !strcmp(wanted, d->current.path) && !force &&
         media_eligible(&d->cfg, &layout, &d->current, NULL)) {
@@ -325,28 +328,31 @@ draw(Daemon *d, uint64_t now, bool force)
     bool video = d->current.video;
     bool blank = cfg->idle_pause && d->blanked;
     bool video_active = video && !d->state.inhibited && !blank && (!cfg->video_empty || !d->occupied);
-    bool drift_active = !video && cfg->parallax && cfg->travel && !d->state.inhibited && !blank &&
-                        (!cfg->parallax_empty || !d->occupied);
+    bool drift_enabled = cfg->parallax && cfg->travel && !d->state.inhibited && !blank && !video;
     d->video_speed = blank || d->state.inhibited || !video ? 0 :
         approach(d->video_speed, video_active ? 1 : 0, delta, cfg->slowdown_ms);
-    d->parallax_speed = blank || d->state.inhibited || video ? 0 :
-        approach(d->parallax_speed, drift_active ? 1 : 0, delta, cfg->slowdown_ms);
     if (video && d->video_speed > 0.001 && player_open(d)) {
         d->player.credit = fmin(1.5, d->player.credit + delta * cfg->video_fps * d->video_speed / 1000);
         if (d->player.credit >= 1) player_read(d);
     }
     int px = -1, py = -1;
-    if (d->parallax_speed > 0.001) x11_pointer(&d->x, &px, &py);
+    if (drift_enabled || d->drifting) x11_pointer(&d->x, &px, &py);
+    d->drifting = false;
     for (size_t i = 0; i < d->x.layout.count; ++i) {
         const Output *o = &d->x.layout.items[i];
+        bool occupied = d->occupied & (UINT32_C(1) << i);
+        bool drift_active = drift_enabled && (!cfg->parallax_empty || !occupied);
+        double speed = blank || d->state.inhibited || video ? 0 :
+            approach(d->parallax_speed[i], drift_active ? 1 : 0, delta, cfg->slowdown_ms);
+        d->parallax_speed[i] = speed;
         bool inside = px >= o->x && py >= o->y && px < o->x + o->w && py < o->y + o->h;
-        double nx = inside ? ((px - o->x) * 2.0 / o->w - 1) * cfg->travel * d->parallax_speed : 0;
-        double ny = inside ? ((py - o->y) * 2.0 / o->h - 1) * cfg->travel * d->parallax_speed : 0;
+        double nx = inside ? ((px - o->x) * 2.0 / o->w - 1) * cfg->travel * speed : 0;
+        double ny = inside ? ((py - o->y) * 2.0 / o->h - 1) * cfg->travel * speed : 0;
         double dx = approach(d->dx[i], nx, delta, cfg->ease_ms);
         double dy = approach(d->dy[i], ny, delta, cfg->ease_ms);
         if (fabs(dx - nx) < 0.12) dx = nx;
         if (fabs(dy - ny) < 0.12) dy = ny;
-        if (dx != d->dx[i] || dy != d->dy[i]) d->dirty = true;
+        if (speed > .001 || dx != 0 || dy != 0) d->drifting = true;
         d->dx[i] = dx;
         d->dy[i] = dy;
     }
@@ -357,23 +363,20 @@ draw(Daemon *d, uint64_t now, bool force)
         else fade = 1 - t * t * (3 - 2 * t);
         d->dirty = true;
     }
-    bool live = video || d->fade_start || d->parallax_speed > 0.001;
-    for (size_t i = 0; i < d->x.layout.count; ++i)
-        if (d->dx[i] != 0 || d->dy[i] != 0) live = true;
-    if (d->x.live_mapped && !live) d->publish = true;
-    if (d->dirty || force || live != d->x.live_mapped) {
-        x11_paint(&d->x, cfg, &d->current, d->dx, d->dy, fade, live);
-        if (d->publish && !d->fade_start) {
-            x11_publish(&d->x);
-            d->publish = false;
-        }
-        d->dirty = false;
+    x11_paint(&d->x, cfg, &d->current, d->dx, d->dy, fade, d->dirty || force);
+    if (d->publish && !d->fade_start) {
+        x11_publish(&d->x);
+        d->publish = false;
     }
+    d->dirty = false;
 }
 
 static void
 status_json(Daemon *d, FILE *out)
 {
+    double parallax_speed = 0;
+    for (size_t i = 0; i < d->x.layout.count; ++i)
+        parallax_speed = fmax(parallax_speed, d->parallax_speed[i]);
     fputs("{\"schema\":1,\"wallpaper\":", out);
     if (d->current.path) json_string(out, d->current.path); else fputs("null", out);
     fputs(",\"selection\":", out);
@@ -384,7 +387,7 @@ status_json(Daemon *d, FILE *out)
                  "\"video_speed\":%.3f,\"parallax_speed\":%.3f,\"changed_at\":%lld,\"rotation\":",
             d->state.paused ? "true" : "false", d->state.inhibited ? "true" : "false",
             d->occupied ? "true" : "false", d->blanked ? "true" : "false",
-            d->video_speed, d->parallax_speed, (long long)d->state.changed);
+            d->video_speed, parallax_speed, (long long)d->state.changed);
     json_string(out, rotation_names[d->cfg.rotation]);
     fprintf(out, ",\"minutes\":%d,\"outputs\":[", d->cfg.minutes);
     for (size_t i = 0; i < d->x.layout.count; ++i) {
@@ -392,7 +395,8 @@ status_json(Daemon *d, FILE *out)
         if (i) fputc(',', out);
         fputs("{\"name\":", out);
         json_string(out, o->name);
-        fprintf(out, ",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d}", o->x, o->y, o->w, o->h);
+        fprintf(out, ",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d,\"occupied\":%s,\"parallax_speed\":%.3f}",
+                o->x, o->y, o->w, o->h, d->occupied & (UINT32_C(1) << i) ? "true" : "false", d->parallax_speed[i]);
     }
     fputs("],\"notice\":", out);
     if (*d->notice) json_string(out, d->notice); else fputs("null", out);
@@ -598,8 +602,7 @@ daemon_run(const Paths *paths, int ready)
         if (now >= d.paint_at || d.dirty) {
             draw(&d, now, false);
             bool video = d.current.video && d.video_speed > .001 && !d.player.failed;
-            bool drift = d.cfg.parallax && !d.current.video && d.parallax_speed > .001;
-            int delay = (video || d.fade_start) ? 12 : drift ? 1000 / d.cfg.parallax_fps : 100;
+            int delay = (video || d.fade_start) ? 12 : d.drifting ? 1000 / d.cfg.parallax_fps : 100;
             d.paint_at = now + (unsigned)delay;
         }
         bool pending_frame = d.player.fd >= 0 && d.player.credit >= 1 && d.video_speed > .001;

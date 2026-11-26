@@ -120,6 +120,25 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         assert {o["name"] for o in docked["outputs"]} == {"Wide", "Laptop"}
         assert docked["wallpaper"] == str(first) and docked["changed_at"] == snapshot["changed_at"]
         until(lambda: x.read(1300, 700) == 0x0D0E0F)
+        if not wm:
+            def output(name):
+                return next(o for o in status()["outputs"] if o["name"] == name)
+
+            run("xdotool", "mousemove", "570", "690")
+            until(lambda: x.read(565, 650) == 0xEC1C3E)
+            until(lambda: output("Wide")["parallax_speed"] > .9 and output("Laptop")["parallax_speed"] > .9)
+            window = x.app()
+            until(lambda: output("Wide")["occupied"] and output("Wide")["parallax_speed"] < .03)
+            assert not output("Laptop")["occupied"] and output("Laptop")["parallax_speed"] > .9
+            run("xdotool", "mousemove", "950", "690")
+            until(lambda: x.read(565, 650) == 0x1937D2)
+            x.move(x.d, window, 180, 525)
+            x.sync(x.d, 0)
+            until(lambda: output("Laptop")["occupied"] and output("Laptop")["parallax_speed"] < .03)
+            until(lambda: x.read(565, 650) == 0xEC1C3E)
+            x.unmap(x.d, window)
+            x.sync(x.d, 0)
+            until(lambda: x.read(565, 650) == 0x1937D2)
         run("xrandr", "--delmonitor", "Laptop")
         run("xrandr", "--delmonitor", "Wide")
         desktop("reapply")
@@ -198,8 +217,11 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         time.sleep(.35)
         run("xdotool", "mousemove", "--window", wid, "514", "214", "click", "1")
         time.sleep(.25)
+        run("xdotool", "mousemove", "--window", wid, "725", "375", "click", "1")
+        time.sleep(.25)
         run("xdotool", "mousemove", "--window", wid, "672", "614", "click", "1")
         until(lambda: status()["rotation"] == "interval")
+        assert "empty_only = false" in cfg.read_text().split("[parallax]")[1].split("[video]")[0]
         run("xdotool", "key", "Escape")
         assert ui.wait(5) == 0, ui.stderr.read()
         print("X11 checks passed: crop and root clicks, eligibility, rotation, video, motion, stowed config, and settings.")

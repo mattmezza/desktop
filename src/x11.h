@@ -7,6 +7,11 @@
 #include <X11/extensions/XShm.h>
 
 typedef struct {
+    Pixmap still;
+    int dx, dy;
+} Viewport;
+
+typedef struct {
     Display *d;
     int screen, depth, randr_event;
     bool randr, saver, dpms, shm;
@@ -22,7 +27,8 @@ typedef struct {
     XShmSegmentInfo segment;
     bool attached;
     int source_w, source_h, canvas_w, canvas_h;
-    bool live_mapped;
+    Viewport viewports[MAX_OUTPUTS];
+    bool live_mapped, crops_valid, overlaps;
 } X11;
 
 bool x11_open(X11 *, char *);
@@ -35,7 +41,7 @@ void x11_paint(X11 *, const Config *, const Media *, const double *, const doubl
 void x11_publish(X11 *);
 bool x11_owns_background(X11 *);
 void x11_pointer(X11 *, int *, int *);
-bool x11_occupied(X11 *);
+uint32_t x11_occupied(X11 *);
 bool x11_blanked(X11 *);
 bool x11_layout_event(const X11 *, const XEvent *);
 void x11_window_class(Display *, Window, const char *, const char *);
