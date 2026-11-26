@@ -24,6 +24,11 @@ typedef struct {
 } Player;
 
 typedef struct {
+    double amount, start, elapsed;
+    bool occupied;
+} BlurTransition;
+
+typedef struct {
     const Paths *paths;
     Config cfg;
     X11 x;
@@ -31,8 +36,9 @@ typedef struct {
     Library library;
     Media current;
     Player players[MAX_OUTPUTS];
-    double dx[MAX_OUTPUTS], dy[MAX_OUTPUTS], parallax_speed[MAX_OUTPUTS];
-    double blur_phase[MAX_OUTPUTS], blur_radius[MAX_OUTPUTS];
+    double dx[MAX_OUTPUTS], dy[MAX_OUTPUTS], follow_x[MAX_OUTPUTS], follow_y[MAX_OUTPUTS];
+    double parallax_speed[MAX_OUTPUTS], blur_radius[MAX_OUTPUTS];
+    BlurTransition blur[MAX_OUTPUTS];
     uint64_t fade_start, layout_due, inspect_at, paint_at, last_tick, retry_at;
     uint32_t occupied;
     bool drifting, playing, blurring, blur_ready, blanked, logged_in, dirty, publish, stop;
@@ -170,6 +176,8 @@ select_media(Daemon *d, Media *media, bool update_state, bool transition, char *
     media->used = true;
     memset(d->dx, 0, sizeof d->dx);
     memset(d->dy, 0, sizeof d->dy);
+    memset(d->follow_x, 0, sizeof d->follow_x);
+    memset(d->follow_y, 0, sizeof d->follow_y);
     d->fade_start = fade ? now_ms() : 0;
     d->dirty = d->publish = true;
     d->notice[0] = '\0';
@@ -276,6 +284,8 @@ reapply(Daemon *d, bool force, char *error)
     if (!unchanged) d->blur_ready = false;
     memset(d->dx, 0, sizeof d->dx);
     memset(d->dy, 0, sizeof d->dy);
+    memset(d->follow_x, 0, sizeof d->follow_x);
+    memset(d->follow_y, 0, sizeof d->follow_y);
     memset(d->parallax_speed, 0, sizeof d->parallax_speed);
     const char *wanted = *d->state.path ? d->state.path : d->current.path;
     if (wanted && d->current.path && !strcmp(wanted, d->current.path) && !force &&
@@ -392,17 +402,65 @@ advance_blur(Daemon *d, size_t i, double delta, bool occupied, bool suspended)
 {
     const Config *cfg = &d->cfg;
     bool enabled = cfg->blur && cfg->blur_radius && d->x.convolution;
-    double target = enabled && occupied ? 1 : 0;
-    double phase = d->blur_phase[i];
-    if (!enabled || !d->blur_ready || (!suspended && !cfg->blur_transition_ms)) phase = target;
+    occupied &= enabled;
+    double target = occupied ? 1 : 0;
+    BlurTransition *b = &d->blur[i];
+    int duration = cfg->blur_transition_ms;
+    if (!enabled || !d->blur_ready || (!suspended && !duration))
+        *b = (BlurTransition){.amount = target, .start = target, .occupied = occupied};
     else if (!suspended) {
-        double step = delta / cfg->blur_transition_ms;
-        phase += fmax(-step, fmin(step, target - phase));
+        if (b->occupied != occupied) {
+            // Start the reverse transition from the last radius that was drawn.
+            b->occupied = occupied;
+            b->start = b->amount;
+            b->elapsed = 0;
+        } else if (b->amount != target) {
+            b->elapsed = fmin(duration, b->elapsed + delta);
+            double change = pow(b->elapsed / duration, cfg->blur_easing_power);
+            b->amount = occupied ? fmin(target, b->start + change) : fmax(target, b->start - change);
+        }
     }
-    d->blur_phase[i] = phase;
-    double half = .5 * pow(2 * fmin(phase, 1 - phase), cfg->blur_easing_power);
-    d->blur_radius[i] = (phase < .5 ? half : 1 - half) * cfg->blur_radius;
-    return !suspended && phase != target;
+    d->blur_radius[i] = b->amount * cfg->blur_radius;
+    return !suspended && b->amount != target;
+}
+
+static double
+follow_pointer(double position, double *follow, double target, double phase, double retention)
+{
+    // Two cascaded low-pass stages respond gently to reversals without overshoot.
+    double next = target + (position - target + phase * (*follow - target)) * retention;
+    *follow = target + (*follow - target) * retention;
+    if (fabs(*follow - target) < .025 && fabs(next - target) < .025)
+        next = *follow = target;
+    return next;
+}
+
+static bool
+advance_parallax(Daemon *d, size_t i, double delta, int px, int py, bool active, bool suspended)
+{
+    const Output *o = &d->x.layout.items[i];
+    const Config *cfg = &d->cfg;
+    double speed = suspended ? 0 : approach(d->parallax_speed[i], active ? 1 : 0, delta, cfg->slowdown_ms);
+    d->parallax_speed[i] = speed;
+    bool inside = px >= o->x && py >= o->y && px < o->x + o->w && py < o->y + o->h;
+    double nx = inside ? ((px - o->x) * 2.0 / o->w - 1) * cfg->travel * speed : 0;
+    double ny = inside ? ((py - o->y) * 2.0 / o->h - 1) * cfg->travel * speed : 0;
+    // 4.74 puts a stationary target at about 95% of the response by ease_ms.
+    double phase = cfg->ease_ms ? 4.74 * delta / cfg->ease_ms : 0;
+    double retention = cfg->ease_ms ? exp(-phase) : 0;
+    double dx = follow_pointer(d->dx[i], &d->follow_x[i], nx, phase, retention);
+    double dy = follow_pointer(d->dy[i], &d->follow_y[i], ny, phase, retention);
+    if (cfg->parallax_max_speed) {
+        double x_step = dx - d->dx[i], y_step = dy - d->dy[i];
+        double distance = hypot(x_step, y_step), limit = cfg->parallax_max_speed * delta / 1000;
+        if (distance > limit) {
+            dx = d->dx[i] + x_step * (limit / distance);
+            dy = d->dy[i] + y_step * (limit / distance);
+        }
+    }
+    d->dx[i] = dx;
+    d->dy[i] = dy;
+    return speed > .001 || dx != 0 || dy != 0;
 }
 
 static void
@@ -420,32 +478,11 @@ draw(Daemon *d, uint64_t now, bool force)
     if (drift_enabled || d->drifting) x11_pointer(&d->x, &px, &py);
     d->drifting = d->playing = d->blurring = false;
     for (size_t i = 0; i < d->x.layout.count; ++i) {
-        const Output *o = &d->x.layout.items[i];
         bool occupied = d->occupied & (UINT32_C(1) << i);
         d->blurring |= advance_blur(d, i, delta, occupied, suspended);
         if (video) d->playing |= advance_video(d, i, delta, !cfg->video_empty || !occupied, suspended);
         bool drift_active = drift_enabled && (!cfg->parallax_empty || !occupied);
-        double speed = suspended || video ? 0 :
-            approach(d->parallax_speed[i], drift_active ? 1 : 0, delta, cfg->slowdown_ms);
-        d->parallax_speed[i] = speed;
-        bool inside = px >= o->x && py >= o->y && px < o->x + o->w && py < o->y + o->h;
-        double nx = inside ? ((px - o->x) * 2.0 / o->w - 1) * cfg->travel * speed : 0;
-        double ny = inside ? ((py - o->y) * 2.0 / o->h - 1) * cfg->travel * speed : 0;
-        double dx = approach(d->dx[i], nx, delta, cfg->ease_ms);
-        double dy = approach(d->dy[i], ny, delta, cfg->ease_ms);
-        if (fabs(dx - nx) < 0.12) dx = nx;
-        if (fabs(dy - ny) < 0.12) dy = ny;
-        if (cfg->parallax_max_speed) {
-            double x_step = dx - d->dx[i], y_step = dy - d->dy[i];
-            double distance = hypot(x_step, y_step), limit = cfg->parallax_max_speed * delta / 1000;
-            if (distance > limit) {
-                dx = d->dx[i] + x_step * (limit / distance);
-                dy = d->dy[i] + y_step * (limit / distance);
-            }
-        }
-        if (speed > .001 || dx != 0 || dy != 0) d->drifting = true;
-        d->dx[i] = dx;
-        d->dy[i] = dy;
+        d->drifting |= advance_parallax(d, i, delta, px, py, drift_active, suspended || video);
     }
     d->blur_ready = true;
     double fade = 0;

@@ -132,12 +132,16 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
             run("xdotool", "mousemove", "720", "240")
             until(lambda: x.read(710, 325) == 0xEC1C3E and x.read(560, 680) == 0xEC1C3E)
             window = x.app()
-            until(lambda: 0 < output("Wide")["blur_radius_px"] < 23)
+            until(lambda: output("Wide")["occupied"])
+            time.sleep(.66)
+            assert 0 < output("Wide")["blur_radius_px"] < 5.5
             until(lambda: output("Wide")["blur_radius_px"] == 24)
             assert 25 < (x.read(710, 325) >> 16) < 213
             assert output("Laptop")["blur_radius_px"] == 0 and x.read(560, 680) == 0xEC1C3E
             visible_app(window, False)
-            until(lambda: 0 < output("Wide")["blur_radius_px"] < 23)
+            until(lambda: not output("Wide")["occupied"])
+            time.sleep(.66)
+            assert 18.5 < output("Wide")["blur_radius_px"] < 24
             until(lambda: output("Wide")["blur_radius_px"] == 0 and x.read(710, 325) == 0xEC1C3E)
 
         desktop("config", "set", "blur.enabled", "false")
@@ -162,6 +166,16 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
             run("xdotool", "mousemove", "1018", "690")
             until(lambda: x.read(568, 650) == 0x1937D2)
             assert time.monotonic() - sweep > .20
+            run("xdotool", "mousemove", "570", "690")
+            until(lambda: x.read(569, 650) == 0xEC1C3E and x.read(570, 650) == 0x1937D2)
+            # These positions straddle a pixel rounding boundary, even while held.
+            for pos in (621, 609, 627, 608, 624, 610):
+                run("xdotool", "mousemove", str(pos), "690")
+                time.sleep(.14)
+                assert x.read(569, 650) == 0xEC1C3E
+            run("xdotool", "mousemove", "625", "690")
+            time.sleep(.8)
+            assert x.read(569, 650) == 0xEC1C3E
         run("xrandr", "--delmonitor", "Laptop")
         run("xrandr", "--delmonitor", "Wide")
         desktop("reapply")
@@ -241,7 +255,7 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
             x.map(x.d, window)
             x.sync(x.d, 0)
             until(lambda: output("Wide")["occupied"] and .15 < output("Wide")["video_speed"] < .85)
-            until(lambda: output("Wide")["video_speed"] == 0)
+            until(lambda: output("Wide")["video_speed"] == 0 and output("Wide")["blur_radius_px"] == 24)
             assert output("Laptop")["video_speed"] > .99
 
             def pixels(y):

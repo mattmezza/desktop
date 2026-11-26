@@ -393,6 +393,7 @@ prepare_crops(X11 *x, const Config *cfg, const Media *media, int padding)
         x11_blur_clear(x, &v->blur);
         if (v->still) XFreePixmap(x->d, v->still);
         v->still = None;
+        v->dx = v->dy = 0;
         if ((!padding && !blur) || i >= x->layout.count) continue;
         const Output *o = &x->layout.items[i];
         v->still = XCreatePixmap(x->d, x->root, (unsigned)(o->w + 2 * padding),
@@ -402,6 +403,13 @@ prepare_crops(X11 *x, const Config *cfg, const Media *media, int padding)
         XRenderFreePicture(x->d, target);
     }
     x->crops_valid = true;
+}
+
+static int
+pixel_offset(double target, int previous)
+{
+    // Let the target cross a wider threshold before changing the displayed pixel.
+    return fabs(target - previous) >= .75 ? (int)lround(target) : previous;
 }
 
 void
@@ -426,7 +434,12 @@ x11_paint(X11 *x, const Config *cfg, const Media *media, const double *dx,
         int radius = (int)lround(blur_radius[i] * BLUR_PRECISION);
         if (v->blur_radius != radius) updates |= UINT32_C(1) << i;
         v->blur_radius = radius;
-        if (v->still && (lround(dx[i]) != v->dx || lround(dy[i]) != v->dy)) updates |= UINT32_C(1) << i;
+        if (v->still) {
+            int next_x = pixel_offset(dx[i], v->dx), next_y = pixel_offset(dy[i], v->dy);
+            if (next_x != v->dx || next_y != v->dy) updates |= UINT32_C(1) << i;
+            v->dx = next_x;
+            v->dy = next_y;
+        }
         if (updates & (UINT32_C(1) << i)) {
             if (o->x < left) left = o->x;
             if (o->y < top) top = o->y;
@@ -438,11 +451,8 @@ x11_paint(X11 *x, const Config *cfg, const Media *media, const double *dx,
     for (size_t i = 0; i < l->count; ++i) {
         const Output *o = &l->items[i];
         Viewport *v = &x->viewports[i];
-        int offset_x = (int)lround(dx[i]), offset_y = (int)lround(dy[i]);
         if (!full && !x->overlaps && !(updates & (UINT32_C(1) << i))) continue;
-        v->dx = offset_x;
-        v->dy = offset_y;
-        int sx = padding + offset_x, sy = padding + offset_y;
+        int sx = padding + v->dx, sy = padding + v->dy;
         int w = o->w + 2 * padding, h = o->h + 2 * padding;
         if (v->blur_radius >= BLUR_MIN_RADIUS && x11_blur_paint(x, v, o, sx, sy, w, h)) continue;
         // Sample each still once at output resolution so fine details stay stable during motion.
