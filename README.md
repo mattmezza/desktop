@@ -12,7 +12,7 @@ Install or upgrade the latest release for Linux x86-64 or ARM64.
 curl -fsSL https://raw.githubusercontent.com/mattmezza/desktop/main/install.sh | sh
 ```
 
-The installer verifies the release checksum and installs into `~/.local` by default. Set `PREFIX` to install elsewhere, or `DESKTOP_VERSION=v0.1.3` to pin a release. Put the installation's `bin` directory on your PATH. The archive includes static Desktop, FFmpeg, and FFprobe executables. It preserves existing configuration on upgrades.
+The installer verifies the release checksum and installs into `~/.local` by default. Set `PREFIX` to install elsewhere, or `DESKTOP_VERSION=v0.1.4` to pin a release. Put the installation's `bin` directory on your PATH. The archive includes static Desktop, FFmpeg, and FFprobe executables. It preserves existing configuration on upgrades.
 
 For a source build, install a C toolchain, pkg-config, Xlib, XRandR, XRender, XFixes, Xext, XScreenSaver, FreeType, HarfBuzz, libpng, libjpeg-turbo, and libwebp development files. CUI and the Geist faces are bundled. Use `ffmpeg` and `ffprobe` from PATH for video.
 
@@ -24,7 +24,7 @@ make install PREFIX="$HOME/.local"
 
 ## Use
 
-Run `desktop` to browse and apply wallpapers. Select a tile to see the crop on each active output, then choose **Set wallpaper**. **Shuffle** applies a new eligible wallpaper. Filter by **Images** or **Videos**, or search by title, filename, tags, description, or credits. Each search word can match a different field. Use the page arrows or scroll wheel to browse, and press **Esc** to go back or close.
+Run `desktop` to browse and apply wallpapers. Select a tile to see the crop on each active output, then choose **Set wallpaper**. **Shuffle** applies a new eligible wallpaper. Filter by **Images** or **Videos**, or check **Hide unsuitable** to show only wallpapers that fit your connected displays and current effects settings. Search by title, filename, tags, description, or credits. Each search word can match a different field. Use the page arrows or scroll wheel to browse, and press **Esc** to go back or close.
 
 In **Settings…**, choose your folder and rotation schedule. Rotation can be manual, once at X login, every N minutes, or once per local calendar day. Open **Effects…** to control wallpaper blur, pointer parallax, and when videos play.
 
@@ -32,32 +32,40 @@ In **Settings…**, choose your folder and rotation schedule. Rotation can be ma
 
 Desktop supports JPEG, PNG, and WebP images, plus local video in formats including MP4, WebM, MOV, and MKV. Videos loop muted. Desktop crops the same source for each output and skips media smaller than any output, with extra headroom for image parallax. If a new monitor makes the current wallpaper ineligible, Desktop can use an eligible temporary choice and restore your selection when it fits again.
 
-## Wallpaper packages
+## Package a wallpaper
 
-A package is a directory with a `wallpaper.ini` descriptor, a thumbnail, and its media. Desktop finds packages directly inside the configured library. `library.recursive` also discovers packages in subfolders. Loose images and videos still work alongside packages.
+Each package is one folder containing a `wallpaper.ini` descriptor, a thumbnail, and the source media. Desktop finds packages directly inside your wallpaper library, alongside loose images and videos. Enable `library.recursive` to find packages in subfolders too.
 
-```sh
-desktop pack lake.mp4 "$HOME/.config/wallpapers/lake"
-desktop reload
-desktop set "$HOME/.config/wallpapers/lake"
-```
+1. From the directory containing your image or video, run `desktop pack` with the source file and a new folder under your library. The command copies the media unchanged, generates `thumbnail.webp`, and writes a descriptor for you.
 
-`pack` copies the media unchanged into a new directory and creates a WebP thumbnail. Edit `wallpaper.ini` to name, tag, or credit the wallpaper, or change how the video plays.
+   ```sh
+   desktop pack lake.mp4 "$HOME/.config/wallpapers/lake"
+   ```
 
-```ini
-[wallpaper]
-version = 1
-type = video
-title = Lake at dawn
-tags = nature, water, sunrise
-thumbnail = thumbnail.webp
+2. Edit the new folder's `wallpaper.ini` to add a title, searchable tags, and credits or change video speed. This descriptor plays the lake video at quarter speed.
 
-[video]
-file = lake.mp4
-speed = 0.5
-```
+   ```ini
+   [wallpaper]
+   version = 1
+   type = video
+   title = Lake at dawn
+   tags = nature, water, sunrise
+   thumbnail = thumbnail.webp
 
-`type = image` uses an `[image]` section with `file`. A video uses `[video]` with `file` and optional `speed`, from `0.05` to `4` with `1` as the default. `0.5` plays at half speed even during the configured pause and resume ramps. Media and thumbnail paths are relative to the package and resolve inside it. Optional common fields are `title`, `tags` (comma-separated), `description`, `author`, `source`, and `license`. Desktop derives a thumbnail from the media if the packaged thumbnail is missing or unreadable. Run `desktop reload` after editing a descriptor.
+   [video]
+   file = lake.mp4
+   speed = 0.25
+   ```
+
+3. Reopen the chooser to pick the wallpaper, or apply the package from the command line.
+
+   ```sh
+   desktop set "$HOME/.config/wallpapers/lake"
+   ```
+
+For a still image, use `type = image` and put `file` under `[image]`. For a video, use `type = video` and put `file` and optional `speed` under `[video]`. Speed ranges from `0.05` to `4` and defaults to `1`. The pause and resume ramps ease between a standstill and the package's speed. Optional `[wallpaper]` fields include `description`, `author`, `source`, and `license`. Keep media and thumbnail paths relative to the package folder. Desktop can derive a preview from the source if the thumbnail is missing or unreadable.
+
+Applying a package reads the descriptor again. Use `desktop reload` to refresh the daemon's library and reapply the current selection after an edit.
 
 `desktop status` prints the media file for existing scripts. Use `desktop status --path` for the package or loose-file path and `desktop list --json` for package metadata. Hooks can read `DESKTOP_PACKAGE` when the active wallpaper has a package.
 
@@ -108,7 +116,7 @@ desktop reload
 desktop inhibit -- lok
 ```
 
-The JSON commands carry a schema version. `status --json` includes the current blur radius and playback speed per output. Errors use stderr and nonzero exit status. See `desktop --help` for all commands.
+The JSON commands carry a schema version. `status --json` reports the configured video multiplier as `playback_speed` and the effective multiplier during motion as `video_speed`. Each output also reports its effective `video_speed` and blur radius. Errors use stderr and nonzero exit status. See `desktop --help` for all commands.
 
 ## Build and release
 

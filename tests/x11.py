@@ -65,8 +65,8 @@ class X:
         self.select = bind("XSelectInput", I, P, U, C.c_long)
         self.pending = bind("XCheckTypedWindowEvent", I, P, U, I, P)
 
-    def read(self, x, y):
-        data = self.image(self.d, self.root, x, y, 1, 1, -1, 2)
+    def read(self, x, y, window=None):
+        data = self.image(self.d, self.root if window is None else window, x, y, 1, 1, -1, 2)
         assert data
         value = self.pixel(data, 0, 0) & 0xFFFFFF
         self.destroy(data)
@@ -314,14 +314,27 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         slow_video = wallpapers / "Slow Motion Test"
         desktop("pack", color_video, slow_video)
         descriptor = slow_video / "wallpaper.ini"
-        descriptor.write_text(descriptor.read_text().replace("speed = 1", "speed = 0.25"))
         desktop("config", "set", "video.ramp_ms", 0)
-        desktop("set", slow_video)
-        until(lambda: x.read(700, 400) >> 16 > 240)
-        time.sleep(.85)
-        assert x.read(700, 400) >> 16 > 240
-        until(lambda: (x.read(700, 400) >> 8) & 255 > 240)
-        assert status()["package"] == str(slow_video) and status()["playback_speed"] == .25
+
+        def time_color_change():
+            desktop("set", first)
+            until(lambda: x.read(700, 400) == 0xEC1C3E)
+            desktop("set", slow_video)
+            until(lambda: x.read(700, 400) & 0xF0F0F0 == 0xF00000)
+            start = time.monotonic()
+            until(lambda: x.read(700, 400) & 0xF0F0F0 == 0x00F000)
+            return time.monotonic() - start
+
+        normal_time = time_color_change()
+        assert .30 <= normal_time <= .95, normal_time
+        assert status()["playback_speed"] == 1
+        descriptor.write_text(descriptor.read_text().replace("speed = 1", "speed = .25"))
+        slow_time = time_color_change()
+        assert 1.65 <= slow_time <= 3.0, slow_time
+        print(f"Video frame transition: {normal_time:.2f}s at 1×, {slow_time:.2f}s at 0.25×.")
+        slowed = status()
+        assert slowed["package"] == str(slow_video) and slowed["playback_speed"] == .25
+        assert slowed["video_speed"] == .25 and all(o["video_speed"] == .25 for o in slowed["outputs"])
         assert desktop("status").stdout.strip() == str(slow_video / color_video.name)
         assert desktop("status", "--path").stdout.strip() == str(slow_video)
         desktop("config", "set", "library.recursive", "true")
@@ -353,6 +366,16 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         time.sleep(.3)
         run("xdotool", "mousemove", "--window", wid, "730", "246", "click", "1")
         until(lambda: status()["path"] == str(packaged))
+        run("xdotool", "key", "ctrl+f", "ctrl+a", "type", "Tiny")
+
+        def has_tile():
+            return x.read(74, 392, int(wid)) != x.read(305, 392, int(wid))
+
+        until(has_tile)
+        run("xdotool", "mousemove", "--window", wid, "235", "341", "click", "1")
+        until(lambda: not has_tile())
+        run("xdotool", "mousemove", "--window", wid, "235", "341", "click", "1")
+        until(has_tile)
         time.sleep(.5)
         run("xdotool", "mousemove", "--window", wid, "810", "34", "click", "1")
         time.sleep(.35)

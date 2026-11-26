@@ -198,10 +198,13 @@ select_path(Daemon *d, const char *path, bool save, bool transition, char *error
     }
     Media media;
     Media *entry = lookup(d, resolved);
-    if (entry) return select_media(d, entry, save, transition, error);
+    if (entry && !entry->package) return select_media(d, entry, save, transition, error);
     if (!media_probe(&d->cfg, resolved, &media, error)) return false;
     bool ok = select_media(d, &media, save, transition, error);
-    media_free(&media);
+    if (entry && ok) {
+        media_free(entry);
+        *entry = media;
+    } else media_free(&media);
     return ok;
 }
 
@@ -527,9 +530,12 @@ static void
 status_json(Daemon *d, FILE *out)
 {
     double parallax_speed = 0, video_speed = 0;
+    double playback_speed = media_speed(&d->current);
+    double rates[MAX_OUTPUTS];
     for (size_t i = 0; i < d->x.layout.count; ++i) {
         parallax_speed = fmax(parallax_speed, d->parallax_speed[i]);
-        video_speed = fmax(video_speed, video_rate(&d->players[i], d->cfg.video_ramp_power));
+        rates[i] = playback_speed * video_rate(&d->players[i], d->cfg.video_ramp_power);
+        video_speed = fmax(video_speed, rates[i]);
     }
     fputs("{\"schema\":1,\"wallpaper\":", out);
     if (d->current.path) json_string(out, media_file(&d->current)); else fputs("null", out);
@@ -544,7 +550,7 @@ status_json(Daemon *d, FILE *out)
     fputs(",\"kind\":", out);
     if (d->current.path) json_string(out, media_kind(&d->current)); else fputs("null", out);
     fputs(",\"playback_speed\":", out);
-    if (d->current.type == MEDIA_VIDEO) fprintf(out, "%.8g", media_speed(&d->current)); else fputs("null", out);
+    if (d->current.type == MEDIA_VIDEO) fprintf(out, "%.8g", playback_speed); else fputs("null", out);
     fprintf(out, ",\"paused\":%s,\"inhibited\":%s,\"occupied\":%s,\"blanked\":%s,"
                  "\"video_speed\":%.3f,\"parallax_speed\":%.3f,\"changed_at\":%lld,\"rotation\":",
             d->state.paused ? "true" : "false", d->state.inhibited ? "true" : "false",
@@ -560,7 +566,7 @@ status_json(Daemon *d, FILE *out)
         fprintf(out, ",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d,\"occupied\":%s,"
                      "\"parallax_speed\":%.3f,\"video_speed\":%.3f,\"blur_radius_px\":%.3f}",
                 o->x, o->y, o->w, o->h, d->occupied & (UINT32_C(1) << i) ? "true" : "false",
-                d->parallax_speed[i], video_rate(&d->players[i], d->cfg.video_ramp_power), d->blur_radius[i]);
+                d->parallax_speed[i], rates[i], d->blur_radius[i]);
     }
     fputs("],\"notice\":", out);
     if (*d->notice) json_string(out, d->notice); else fputs("null", out);

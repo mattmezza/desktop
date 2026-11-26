@@ -3,7 +3,7 @@ PKG_CONFIG ?= pkg-config
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 DATADIR ?= $(PREFIX)/share/desktop
-VERSION ?= 0.1.3
+VERSION ?= 0.1.4
 BUILD ?= build
 PACKAGES = x11 xrandr xrender xfixes xext xscrnsaver freetype2 harfbuzz libpng libjpeg libwebp
 
@@ -23,6 +23,7 @@ APP = $(patsubst %.c,$(BUILD)/%.o,$(wildcard src/*.c))
 CUI = $(addprefix $(BUILD)/vendor/cui/,src/core/cui.o src/core/cui_background.o \
        src/effects/cui_effects.o src/text/cui_text.o backends/software/cui_software.o \
        src/base/cui_base.o src/base/cui_edit.o src/base/cui_icon.o src/base/cui_content.o src/base/cui_models.o \
+       src/base/cui_disclosure.o \
        src/components/cui_components.o src/components/cui_content.o src/theme/cui_theme.o src/theme/cui_theme_motion.o)
 OBJECTS = $(APP) $(CUI) $(BUILD)/assets/embedded.o
 WARNINGS = -Wall -Wextra -Wpedantic

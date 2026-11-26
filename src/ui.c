@@ -73,7 +73,7 @@ typedef struct {
     EditorScreen screen;
     MediaType filter;
     uint64_t entered, last_frame, update_at;
-    bool dirty, working, scan, finish, theme_dirty;
+    bool dirty, working, scan, finish, theme_dirty, suitable_only;
     unsigned visible[PAGE_MAX];
     size_t visible_count, pages;
 } Editor;
@@ -618,7 +618,10 @@ tile(Editor *e, size_t index, cui_rect r)
 static bool
 matches(const Editor *e, size_t index)
 {
-    return index < e->library.count && media_matches(&e->library.items[index], e->filter, e->search_text);
+    if (index >= e->library.count) return false;
+    const Media *m = &e->library.items[index];
+    return media_matches(m, e->filter, e->search_text) &&
+           (!e->suitable_only || media_eligible(&e->cfg, &e->layout, m, NULL));
 }
 
 static void
@@ -709,6 +712,19 @@ browse(Editor *e)
     const float pager_x = e->w - margin - 113;
     const float search_w = fminf(232, fminf(width * .37f, pager_x - filter_x - 8));
     const float search_x = pager_x - search_w - 12;
+    const cui_str suitable_label = cui_string("Hide unsuitable");
+    const float suitable_w = ceilf(cui_measure_text(e->ui, suitable_label, t.font_size).width) + 34;
+    const bool suitable_in_toolbar = search_x - filter_x >= suitable_w + 16;
+    const cui_rect suitable_rect = suitable_in_toolbar ? (cui_rect){filter_x + 8, bar + 2, suitable_w, 30} :
+                                                       (cui_rect){e->w - margin - suitable_w, e->h - 34, suitable_w, 24};
+    cui_begin_absolute_box(e->ui, 0, (cui_box){.align_y = CUI_ALIGN_CENTER}, suitable_rect);
+    cui_id suitable_id = cui_id_from(e->ui, "hide unsuitable");
+    if (cui_checkbox(e->ui, suitable_id, &t, suitable_label, &e->suitable_only, false)) {
+        e->page = 0;
+        e->dirty = true;
+    }
+    cui_set_cursor(e->ui, suitable_id, CUI_CURSOR_POINTER);
+    cui_end_box(e->ui);
     char prior_search[sizeof e->search_text];
     strcpy(prior_search, e->search_text);
     input(e, "Find a wallpaper", (cui_rect){search_x, bar + 2, search_w, 30},
@@ -744,8 +760,10 @@ browse(Editor *e)
     }
     if (!count && e->library.count)
         text_at(e, (cui_rect){margin, grid_y + 20, width, 28}, "No matching wallpapers", t.font_size, t.muted, false, false, true);
-    if (*e->message)
-        text_at(e, (cui_rect){margin, e->h - 34, width, 22}, e->message, t.font_size - 1, t.muted, false, false, false);
+    if (*e->message) {
+        float message_w = suitable_in_toolbar ? width : width - suitable_w - 12;
+        text_at(e, (cui_rect){margin, e->h - 34, message_w, 22}, e->message, t.font_size - 1, t.muted, false, false, false);
+    }
 }
 
 static void
