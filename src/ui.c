@@ -357,6 +357,30 @@ text_at(Editor *e, cui_rect r, const char *s, float size, cui_color color,
 }
 
 static void
+wrapped_text_at(Editor *e, cui_rect r, const char *text, float size, float line_height, cui_color color)
+{
+    cui_text_style style = {0};
+    cui_begin_absolute_box(e->ui, 0, (cui_box){.clip = true}, r);
+    while (*text) {
+        const char *end = text, *space = NULL;
+        while (*end) {
+            const char *next = end + 1;
+            while (((unsigned char)*next & 0xc0) == 0x80) ++next;
+            if (*end == ' ') space = end;
+            if (end > text && cui_measure_text(e->ui, (cui_str){text, (size_t)(next - text)}, size).width > r.w) {
+                if (space) end = space;
+                break;
+            }
+            end = next;
+        }
+        cui_text_line(e->ui, (cui_str){text, (size_t)(end - text)}, size, color, line_height, style);
+        text = end;
+        while (*text == ' ') ++text;
+    }
+    cui_end_box(e->ui);
+}
+
+static void
 picture(Editor *e, cui_rect r, const Image *image, cui_rect source, float opacity)
 {
     if (!image->rgba || r.w < 1 || r.h < 1) return;
@@ -594,14 +618,16 @@ browse(Editor *e)
 {
     cui_theme t = e->theme;
     const float margin = 24, width = e->w - 2 * margin;
-    const float preview_h = fminf(258, fmaxf(145, e->h * .37f));
     const float preview_w = fmaxf(width * .62f, width - 290);
     const float panel_x = margin + preview_w + 22, panel_w = e->w - margin - panel_x;
-    const float top = 70, bar = top + preview_h + 16;
     Media *m = e->selected < e->library.count ? &e->library.items[e->selected] : NULL;
     char reason[ERROR_SIZE] = "";
     bool ready = m && media_eligible(&e->cfg, &e->layout, m, reason);
     bool active = m && !strcmp(m->path, e->active);
+    const float reason_line = t.font_size + 4;
+    const float reason_h = (panel_w < 200 ? 4 : 3) * reason_line;
+    const float preview_h = fmaxf(fminf(258, fmaxf(145, e->h * .37f)), m && !ready ? 168 + reason_h : 0);
+    const float top = 70, bar = top + preview_h + 16;
     icon(e, MONITOR, (cui_rect){margin, 24, 22, 22}, t.text);
     text_at(e, (cui_rect){margin + 31, 18, 240, 34}, "Desktop", t.font_size + 8, t.text, false, true, false);
     if (button(e, "settings", "Settings…", (cui_rect){e->w - 148, 17, 124, 36}, SETTINGS, GHOST, false)) {
@@ -621,8 +647,8 @@ browse(Editor *e)
                     t.font_size, t.muted, true, false, false);
         }
         if (!ready)
-            text_at(e, (cui_rect){panel_x, top + 84, panel_w, 20}, reason,
-                    t.font_size - 1, t.muted, false, false, false);
+            wrapped_text_at(e, (cui_rect){panel_x, top + 84, panel_w, reason_h}, reason,
+                            t.font_size - 1, reason_line, t.muted);
     } else {
         text_at(e, (cui_rect){panel_x, top + 20, panel_w, 28}, e->worker.busy ? "Loading wallpapers" : "No wallpapers",
                 t.font_size + 4, t.text, false, true, false);
