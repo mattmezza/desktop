@@ -1,0 +1,72 @@
+name: Release Desktop
+
+on:
+  push:
+    tags: ['v[0-9]*']
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - {arch: x86_64, runner: ubuntu-24.04}
+          - {arch: aarch64, runner: ubuntu-24.04-arm}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Build and verify static executables
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          mkdir dist
+          docker run --rm -v "$PWD:/src:ro" -v "$PWD/dist:/out" \
+            alpine:3.23 sh /src/tools/build-release.sh "$GITHUB_REF_NAME" /out
+      - name: Exercise the executable and both bundled helpers
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth xdotool x11-utils x11-xserver-utils ffmpeg
+          PATH="$PWD/dist/test-bin:$PATH" \
+            xvfb-run -a -s '-noreset -screen 0 1440x900x24' python3 tests/x11.py "dist/desktop-linux-$ARCH"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7
+        with:
+          name: desktop-linux-${{ matrix.arch }}
+          path: |
+            dist/desktop-linux-${{ matrix.arch }}*
+            dist/ffmpeg-9.1.tar.xz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: desktop-linux-*
+          path: dist
+          merge-multiple: true
+      - name: Publish checked assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cp install.sh dist/
+          cd dist
+          sha256sum -c desktop-linux-*.sha256
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+            --title "Desktop $GITHUB_REF_NAME" desktop-linux-* ffmpeg-9.1.tar.xz install.sh
