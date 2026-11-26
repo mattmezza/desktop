@@ -295,6 +295,44 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         x.unmap(x.d, window)
         x.sync(x.d, 0)
 
+        packaged = wallpapers / "Canyon Morning"
+        desktop("pack", second, packaged)
+        assert (packaged / second.name).read_bytes() == second.read_bytes()
+        assert (packaged / "thumbnail.webp").read_bytes()[8:12] == b"WEBP"
+        assert desktop("pack", first, packaged, check=False).returncode != 0
+        descriptor = packaged / "wallpaper.ini"
+        descriptor.write_text(descriptor.read_text().replace(
+            "[wallpaper]\n", "[wallpaper]\ntitle = Canyon Morning\ntags = sunrise, sandstone\nauthor = Test Artist\n"))
+        broken = wallpapers / "Broken"
+        broken.mkdir()
+        (broken / "wallpaper.ini").write_text("[wallpaper]\nversion = 1\ntype = image\n[image]\nfile = ../Alpha.png\n")
+        assert desktop("set", broken, check=False).returncode != 0
+
+        color_video = tmp / "Clock.mp4"
+        run("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=red:size=1536x960:rate=12:d=1.5",
+            "-vf", "drawbox=color=lime:t=fill:enable='gte(t,0.5)'", "-c:v", "mpeg4", "-threads", "1", str(color_video))
+        slow_video = wallpapers / "Slow Motion Test"
+        desktop("pack", color_video, slow_video)
+        descriptor = slow_video / "wallpaper.ini"
+        descriptor.write_text(descriptor.read_text().replace("speed = 1", "speed = 0.25"))
+        desktop("config", "set", "video.ramp_ms", 0)
+        desktop("set", slow_video)
+        until(lambda: x.read(700, 400) >> 16 > 240)
+        time.sleep(.85)
+        assert x.read(700, 400) >> 16 > 240
+        until(lambda: (x.read(700, 400) >> 8) & 255 > 240)
+        assert status()["package"] == str(slow_video) and status()["playback_speed"] == .25
+        assert desktop("status").stdout.strip() == str(slow_video / color_video.name)
+        assert desktop("status", "--path").stdout.strip() == str(slow_video)
+        desktop("config", "set", "library.recursive", "true")
+        metadata = json.loads(desktop("list", "--json").stdout)["wallpapers"]
+        assert not any(Path(row["path"]).parent in (packaged, slow_video) for row in metadata)
+        assert not any(row["path"] == str(broken) for row in metadata)
+        package_entry = next(row for row in metadata if row["path"] == str(packaged))
+        assert package_entry["kind"] == "image" and package_entry["tags"] == ["sunrise", "sandstone"]
+        assert package_entry["title"] == "Canyon Morning" and package_entry["author"] == "Test Artist"
+        assert package_entry["media"] == str(packaged / second.name)
+
         desktop("set", first)
         ui = sp.Popen([BIN], stdout=sp.DEVNULL, stderr=sp.PIPE, text=True)
         def editor_window():
@@ -303,6 +341,18 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         wid = until(editor_window)
         assert "_NET_WM_WINDOW_TYPE_DIALOG" in run("xprop", "-id", wid, "_NET_WM_WINDOW_TYPE").stdout
         run("xdotool", "windowfocus", wid)
+        time.sleep(.7)
+        run("xdotool", "mousemove", "--window", wid, "177", "341", "click", "1")
+        time.sleep(.25)
+        run("xdotool", "key", "ctrl+f", "type", "slow motion")
+        time.sleep(.3)
+        run("xdotool", "mousemove", "--window", wid, "730", "246", "click", "1")
+        until(lambda: status()["path"] == str(slow_video))
+        run("xdotool", "mousemove", "--window", wid, "102", "341", "click", "1")
+        run("xdotool", "key", "ctrl+f", "ctrl+a", "type", "sunrise sandstone")
+        time.sleep(.3)
+        run("xdotool", "mousemove", "--window", wid, "730", "246", "click", "1")
+        until(lambda: status()["path"] == str(packaged))
         time.sleep(.5)
         run("xdotool", "mousemove", "--window", wid, "810", "34", "click", "1")
         time.sleep(.35)
@@ -320,7 +370,16 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         assert "empty_only = false" in cfg.read_text().split("[parallax]")[1].split("[video]")[0]
         run("xdotool", "key", "Escape")
         assert ui.wait(5) == 0, ui.stderr.read()
-        print("X11 checks passed: crop, eligibility, rotation, parallax, video, blur, and settings.")
+        desktop("set", first)
+        previous = status()
+        migrated = wallpapers / "Alpha Package"
+        desktop("pack", first, migrated)
+        first.rename(tmp / first.name)
+        desktop("stop")
+        restored = status()
+        assert restored["selection"] == str(migrated) and restored["path"] == str(migrated)
+        assert restored["changed_at"] == previous["changed_at"]
+        print("X11 checks passed: crop, rotation, effects, packages, video speed, filter, search, and settings.")
     finally:
         desktop("stop", check=False)
         x.close(x.d)

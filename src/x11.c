@@ -395,7 +395,7 @@ prepare_crops(X11 *x, const Config *cfg, const Media *media, int padding)
         Picture target = XRenderCreatePicture(x->d, v->still, x->format, 0, NULL);
         render_crop(x, target, cfg, media, o, 0, 0, padding);
         XRenderFreePicture(x->d, target);
-        if (blur && !media->video)
+        if (blur && media->type == MEDIA_IMAGE)
             x11_blur_prepare(x, v, o->w + 2 * padding, o->h + 2 * padding, cfg->blur_radius);
     }
     x->crops_valid = true;
@@ -415,7 +415,7 @@ x11_paint(X11 *x, const Config *cfg, const Media *media, const double *dx,
     if (!x->source) return;
     Display *d = x->d;
     const Layout *l = &x->layout;
-    int padding = !media->video && cfg->parallax ? cfg->travel : 0;
+    int padding = media->type == MEDIA_IMAGE && cfg->parallax ? cfg->travel : 0;
     if (!x->crops_valid) {
         prepare_crops(x, cfg, media, padding);
         full = true;

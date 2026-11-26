@@ -71,6 +71,7 @@ typedef struct {
     size_t selected, previewed, page;
     Image preview;
     EditorScreen screen;
+    MediaType filter;
     uint64_t entered, last_frame, update_at;
     bool dirty, working, scan, finish, theme_dirty;
     unsigned visible[PAGE_MAX];
@@ -88,8 +89,9 @@ media_worker(void *arg)
         Job job = w->job;
         pthread_mutex_unlock(&w->mutex);
         w->error[0] = '\0';
-        w->ok = job == SCAN ? library_read(&w->cfg, &w->lib, w->error) :
-            media_decode(&w->cfg, &w->media, job == PREVIEW ? 1000 : 336, &w->image, w->error);
+        if (job == SCAN) w->ok = library_read(&w->cfg, &w->lib, w->error);
+        else if (job == THUMB) w->ok = media_thumbnail(&w->cfg, &w->media, &w->image, w->error);
+        else w->ok = media_decode(&w->cfg, &w->media, 1000, &w->image, w->error);
         pthread_mutex_lock(&w->mutex);
         w->completed = true;
         (void)write(w->signal[1], "w", 1);
@@ -125,7 +127,7 @@ worker_end(Worker *w)
     pthread_cond_destroy(&w->cond);
     close(w->signal[0]);
     close(w->signal[1]);
-    free(w->media.path);
+    media_free(&w->media);
     library_free(&w->lib);
     image_free(&w->image);
 }
@@ -136,10 +138,9 @@ worker_request(Editor *e, Job job, size_t index)
     Worker *w = &e->worker;
     pthread_mutex_lock(&w->mutex);
     if (!w->busy) {
-        if (job != SCAN) {
-            w->media = e->library.items[index];
-            w->media.path = strdup(w->media.path);
-            if (!w->media.path) { pthread_mutex_unlock(&w->mutex); return; }
+        if (job != SCAN && !media_copy(&w->media, &e->library.items[index])) {
+            pthread_mutex_unlock(&w->mutex);
+            return;
         }
         w->index = index;
         w->cfg = e->cfg;
@@ -193,8 +194,7 @@ worker_collect(Editor *e)
             }
         }
         image_free(&w->image);
-        free(w->media.path);
-        w->media = (Media){0};
+        media_free(&w->media);
         w->job = NONE;
         w->completed = w->busy = false;
         pthread_cond_signal(&w->cond);
@@ -497,8 +497,8 @@ refresh_active(Editor *e, bool select_active)
     FILE *stream = open_memstream(&path, &size);
     int result = 1;
     if (stream) {
-        const char *args[] = {"status"};
-        result = command_run(e->paths, 1, args, stream, error);
+        const char *args[] = {"status", "--path"};
+        result = command_run(e->paths, 2, args, stream, error);
         fclose(stream);
     }
     if (!result && size && size <= PATH_MAX) {
@@ -528,6 +528,7 @@ shuffle_now(Editor *e)
 {
     if (action(e, "next", NULL)) {
         cui_edit_set_content(e->search, (cui_edit_content){.text = cui_string("")});
+        e->filter = MEDIA_ANY;
         refresh_active(e, true);
         snprintf(e->message, sizeof e->message, "Wallpaper shuffled.");
     }
@@ -591,7 +592,7 @@ tile(Editor *e, size_t index, cui_rect r)
     cui_begin_absolute_box(e->ui, id, (cui_box){
         .background = bg, .border = line, .border_width = selected ? 2 : 1, .radius = t.radius
     }, r);
-    cui_interaction click = cui_interact(e->ui, id, CUI_ROLE_BUTTON, cui_string(filename(m->path)), false, selected, 0);
+    cui_interaction click = cui_interact(e->ui, id, CUI_ROLE_BUTTON, cui_string(media_title(m)), false, selected, 0);
     cui_set_cursor(e->ui, id, CUI_CURSOR_POINTER);
     float inset = selected ? 4 : 3, height = r.h - 25;
     cui_rect poster = {inset, inset, r.w - inset * 2, height - inset};
@@ -599,19 +600,34 @@ tile(Editor *e, size_t index, cui_rect r)
         picture(e, poster, &m->thumb, cover(&m->thumb, poster.w, poster.h), good ? 1 : .43f);
     else {
         box(e, poster, cui_color_mix_oklab(bg, t.text, .04f), fmaxf(0, t.radius - inset), (cui_color){0});
-        icon(e, m->video ? PLAY : PHOTO,
+        icon(e, m->type == MEDIA_VIDEO ? PLAY : PHOTO,
              (cui_rect){r.w / 2 - 10, height / 2 - 10, 20, 20}, t.muted);
     }
-    if (m->video || active) {
+    if (m->type == MEDIA_VIDEO || active) {
         bool right = active;
         float x = right ? r.w - 27 : 7;
         box(e, (cui_rect){x, 7, 20, 20}, active ? t.primary : (cui_color){13, 14, 15, 220}, 4, (cui_color){0});
         icon(e, active ? CHECK : PLAY, (cui_rect){x + 3, 10, 14, 14}, active ? t.on_primary : rgb(0xffffff));
     }
-    text_at(e, (cui_rect){8, height + 2, r.w - 16, 22}, filename(m->path), t.font_size - 2,
+    text_at(e, (cui_rect){8, height + 2, r.w - 16, 22}, media_title(m), t.font_size - 2,
             good ? t.text : t.muted, false, false, false);
     cui_end_box(e->ui);
     if (click.activated && !selected) { e->selected = index; e->message[0] = '\0'; e->dirty = true; }
+}
+
+static bool
+matches(const Editor *e, size_t index)
+{
+    return index < e->library.count && media_matches(&e->library.items[index], e->filter, e->search_text);
+}
+
+static void
+match_selection(Editor *e)
+{
+    if (matches(e, e->selected)) return;
+    e->selected = SIZE_MAX;
+    for (size_t i = 0; i < e->library.count; ++i)
+        if (matches(e, i)) { e->selected = i; break; }
 }
 
 static void
@@ -621,6 +637,7 @@ browse(Editor *e)
     const float margin = 24, width = e->w - 2 * margin;
     const float preview_w = fmaxf(width * .62f, width - 290);
     const float panel_x = margin + preview_w + 22, panel_w = e->w - margin - panel_x;
+    match_selection(e);
     Media *m = e->selected < e->library.count ? &e->library.items[e->selected] : NULL;
     char reason[ERROR_SIZE] = "";
     bool ready = m && media_eligible(&e->cfg, &e->layout, m, reason);
@@ -645,20 +662,25 @@ browse(Editor *e)
     }
     preview(e, m, (cui_rect){margin, top, preview_w, preview_h});
     if (m) {
-        const char *tag = active ? "CURRENT WALLPAPER" : m->video ? "VIDEO" : "IMAGE";
+        const char *tag = active ? "CURRENT WALLPAPER" : m->type == MEDIA_VIDEO ? "VIDEO" : "IMAGE";
         text_at(e, (cui_rect){panel_x, top + 7, panel_w, 18}, tag, t.font_size - 3,
                 active ? t.primary : t.muted, true, true, false);
-        text_at(e, (cui_rect){panel_x, top + 29, panel_w, 27}, filename(m->path), t.font_size + 4, t.text, false, true, false);
+        text_at(e, (cui_rect){panel_x, top + 29, panel_w, 27}, media_title(m), t.font_size + 4, t.text, false, true, false);
         if (m->w && m->h) {
             char dimensions[96];
-            snprintf(dimensions, sizeof dimensions, "%d × %d", m->w, m->h);
+            if (m->type == MEDIA_VIDEO && media_speed(m) != 1)
+                snprintf(dimensions, sizeof dimensions, "%.3g× · %d × %d", media_speed(m), m->w, m->h);
+            else snprintf(dimensions, sizeof dimensions, "%d × %d", m->w, m->h);
             text_at(e, (cui_rect){panel_x, top + 59, panel_w, 20}, dimensions,
                     t.font_size, t.muted, true, false, false);
         }
         if (!ready)
             wrapped_text_at(e, (cui_rect){panel_x, top + 84, panel_w, reason_h}, reason,
                             t.font_size - 1, reason_line, t.muted);
-    } else {
+        else if (m->package && *m->package->tags && preview_h >= 189)
+            text_at(e, (cui_rect){panel_x, top + 84, panel_w, 22}, m->package->tags,
+                    t.font_size - 1, t.muted, false, false, false);
+    } else if (!e->library.count) {
         text_at(e, (cui_rect){panel_x, top + 20, panel_w, 28}, e->worker.busy ? "Loading wallpapers" : "No wallpapers",
                 t.font_size + 4, t.text, false, true, false);
         text_at(e, (cui_rect){panel_x, top + 53, panel_w, 22}, "Choose a folder in Settings.",
@@ -671,9 +693,21 @@ browse(Editor *e)
                SHUFFLE, active || !m ? PRIMARY : OUTLINED, !e->library.count))
         shuffle_now(e);
 
-    text_at(e, (cui_rect){margin, bar, 160, 34}, "Wallpapers", t.font_size + 1, t.text, false, true, false);
-    const float search_w = fminf(232, width * .37f);
+    static const char *const filters[] = {"All", "Images", "Videos"};
+    float filter_x = margin;
+    for (size_t i = 0; i < sizeof filters / sizeof *filters; ++i) {
+        const char *label = filters[i];
+        float button_w = fmaxf(44, ceilf(cui_measure_text(e->ui, cui_string(label), t.font_size).width) + 20);
+        if (button(e, label, label, (cui_rect){filter_x, bar + 2, button_w, 30},
+                   ICONS, e->filter == (MediaType)i ? ACTIVE : GHOST, false)) {
+            e->filter = (MediaType)i;
+            e->page = 0;
+            e->dirty = true;
+        }
+        filter_x += button_w + 4;
+    }
     const float pager_x = e->w - margin - 113;
+    const float search_w = fminf(232, fminf(width * .37f, pager_x - filter_x - 8));
     const float search_x = pager_x - search_w - 12;
     char prior_search[sizeof e->search_text];
     strcpy(prior_search, e->search_text);
@@ -685,7 +719,7 @@ browse(Editor *e)
     size_t step = (size_t)(columns * rows);
     size_t count = 0;
     for (size_t i = 0; i < e->library.count; ++i)
-        if (!*e->search_text || strcasestr(filename(e->library.items[i].path), e->search_text)) ++count;
+        if (matches(e, i)) ++count;
     e->pages = count ? (count - 1) / step + 1 : 1;
     if (e->page >= e->pages) e->page = e->pages - 1;
     if (button(e, "page previous", "Previous page", (cui_rect){pager_x, bar + 2, 30, 30},
@@ -701,14 +735,14 @@ browse(Editor *e)
     size_t seen = 0;
     e->visible_count = 0;
     for (size_t i = 0; i < e->library.count && e->visible_count < step; ++i) {
-        if (*e->search_text && !strcasestr(filename(e->library.items[i].path), e->search_text)) continue;
+        if (!matches(e, i)) continue;
         if (seen++ < e->page * step) continue;
         size_t cell = e->visible_count++;
         e->visible[cell] = (unsigned)i;
         tile(e, i, (cui_rect){margin + (float)(cell % (size_t)columns) * (card_w + gap),
                             grid_y + (float)(cell / (size_t)columns) * (card_h + gap), card_w, card_h});
     }
-    if (!count && *e->search_text)
+    if (!count && e->library.count)
         text_at(e, (cui_rect){margin, grid_y + 20, width, 28}, "No matching wallpapers", t.font_size, t.muted, false, false, true);
     if (*e->message)
         text_at(e, (cui_rect){margin, e->h - 34, width, 22}, e->message, t.font_size - 1, t.muted, false, false, false);

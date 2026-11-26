@@ -177,9 +177,10 @@ usage(FILE *f)
           "  desktop                    Open wallpaper settings\n"
           "  desktop launch             Choose a wallpaper action in Launch\n"
           "  desktop daemon | login     Run the session daemon or initialize it at login\n"
-          "  desktop next | set PATH    Shuffle or apply a wallpaper\n"
-          "  desktop status [--json]    Show the applied wallpaper and session state\n"
-          "  desktop list [--json]      Show files, dimensions, and eligibility\n"
+          "  desktop next | set PATH    Shuffle or apply a wallpaper file or package\n"
+          "  desktop pack FILE DIR      Copy a wallpaper into a new package with a thumbnail\n"
+          "  desktop status [--json | --path]  Show session state or the active package path\n"
+          "  desktop list [--json]      Show wallpapers, metadata, and eligibility\n"
           "  desktop pause | resume     Pause or resume automatic rotation\n"
           "  desktop inhibit | uninhibit   Suspend or restore motion\n"
           "  desktop inhibit -- CMD ...  Suspend motion while CMD runs (e.g. a locker)\n"
@@ -252,6 +253,12 @@ main(int argc, char **argv)
     if (argc == 2 && !strcmp(argv[1], "daemon")) return daemon_run(&paths, -1);
     if (argc == 2 && !strcmp(argv[1], "launch")) return launch_menu(&paths);
     const char *cmd = argv[1];
+    if (argc == 4 && !strcmp(cmd, "pack")) {
+        Config cfg;
+        if (!config_read(&paths, &cfg, error) || !package_create(&cfg, argv[2], argv[3], error)) goto failed;
+        puts(argv[3]);
+        return 0;
+    }
     if (argc >= 4 && !strcmp(cmd, "inhibit") && !strcmp(argv[2], "--"))
         return guard_motion(&paths, argv + 3);
     if (!strcmp(cmd, "config")) {
@@ -281,6 +288,7 @@ main(int argc, char **argv)
     if ((!strcmp(cmd, "status") || !strcmp(cmd, "list")) &&
         (argc == 2 || (argc == 3 && !strcmp(argv[2], "--json"))))
         valid = true;
+    if (argc == 3 && !strcmp(cmd, "status") && !strcmp(argv[2], "--path")) valid = true;
     if (argc == 3 && !strcmp(cmd, "set")) {
         char absolute[PATH_MAX];
         if (!realpath(argv[2], absolute)) {

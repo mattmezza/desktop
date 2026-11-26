@@ -24,13 +24,42 @@ make install PREFIX="$HOME/.local"
 
 ## Use
 
-Run `desktop` to browse and apply wallpapers. Select a tile to see the crop on each active output, then choose **Set wallpaper**. **Shuffle** applies a new eligible wallpaper. Search by filename, use the page arrows or the scroll wheel, and press **Esc** to go back or close.
+Run `desktop` to browse and apply wallpapers. Select a tile to see the crop on each active output, then choose **Set wallpaper**. **Shuffle** applies a new eligible wallpaper. Filter by **Images** or **Videos**, or search by title, filename, tags, description, or credits. Each search word can match a different field. Use the page arrows or scroll wheel to browse, and press **Esc** to go back or close.
 
 In **Settings…**, choose your folder and rotation schedule. Rotation can be manual, once at X login, every N minutes, or once per local calendar day. Open **Effects…** to control wallpaper blur, pointer parallax, and when videos play.
 
 ![Desktop’s Effects page shows wallpaper blur, pointer parallax, and video playback options](media/effects.png)
 
 Desktop supports JPEG, PNG, and WebP images, plus local video in formats including MP4, WebM, MOV, and MKV. Videos loop muted. Desktop crops the same source for each output and skips media smaller than any output, with extra headroom for image parallax. If a new monitor makes the current wallpaper ineligible, Desktop can use an eligible temporary choice and restore your selection when it fits again.
+
+## Wallpaper packages
+
+A package is a directory with a `wallpaper.ini` descriptor, a thumbnail, and its media. Desktop finds packages directly inside the configured library. `library.recursive` also discovers packages in subfolders. Loose images and videos still work alongside packages.
+
+```sh
+desktop pack lake.mp4 "$HOME/.config/wallpapers/lake"
+desktop reload
+desktop set "$HOME/.config/wallpapers/lake"
+```
+
+`pack` copies the media unchanged into a new directory and creates a WebP thumbnail. Edit `wallpaper.ini` to name, tag, or credit the wallpaper, or change how the video plays.
+
+```ini
+[wallpaper]
+version = 1
+type = video
+title = Lake at dawn
+tags = nature, water, sunrise
+thumbnail = thumbnail.webp
+
+[video]
+file = lake.mp4
+speed = 0.5
+```
+
+`type = image` uses an `[image]` section with `file`. A video uses `[video]` with `file` and optional `speed`, from `0.05` to `4` with `1` as the default. `0.5` plays at half speed even during the configured pause and resume ramps. Media and thumbnail paths are relative to the package and resolve inside it. Optional common fields are `title`, `tags` (comma-separated), `description`, `author`, `source`, and `license`. Desktop derives a thumbnail from the media if the packaged thumbnail is missing or unreadable. Run `desktop reload` after editing a descriptor.
+
+`desktop status` prints the media file for existing scripts. Use `desktop status --path` for the package or loose-file path and `desktop list --json` for package metadata. Hooks can read `DESKTOP_PACKAGE` when the active wallpaper has a package.
 
 ## Session and launcher
 

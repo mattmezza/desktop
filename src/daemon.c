@@ -158,21 +158,19 @@ select_media(Daemon *d, Media *media, bool update_state, bool transition, char *
     }
     bool fade = transition && d->current.path && d->cfg.crossfade_ms &&
                 strcmp(media->path, d->current.path) != 0;
-    char *path = strdup(media->path);
-    if (!path) { image_free(&picture); snprintf(error, ERROR_SIZE, "Out of memory."); return false; }
+    Media selected;
+    if (!media_copy(&selected, media)) { image_free(&picture); snprintf(error, ERROR_SIZE, "Out of memory."); return false; }
     if (fade) x11_capture(&d->x);
     bool ok = x11_upload(&d->x, &picture, &d->cfg);
     image_free(&picture);
     if (!ok) {
-        free(path);
+        media_free(&selected);
         snprintf(error, ERROR_SIZE, "Could not upload the wallpaper pixels.");
         return false;
     }
     clear_playback(d);
-    free(d->current.path);
-    d->current = *media;
-    d->current.path = path;
-    d->current.thumb = (Image){0};
+    media_free(&d->current);
+    d->current = selected;
     media->used = true;
     memset(d->dx, 0, sizeof d->dx);
     memset(d->dy, 0, sizeof d->dy);
@@ -182,7 +180,7 @@ select_media(Daemon *d, Media *media, bool update_state, bool transition, char *
     d->dirty = d->publish = true;
     d->notice[0] = '\0';
     if (update_state) {
-        strcpy(d->state.path, path);
+        strcpy(d->state.path, selected.path);
         d->state.changed = time(NULL);
         if (!state_write(d->paths, &d->state))
             snprintf(d->notice, sizeof d->notice, "Wallpaper applied. Could not save session state.");
@@ -203,8 +201,25 @@ select_path(Daemon *d, const char *path, bool save, bool transition, char *error
     if (entry) return select_media(d, entry, save, transition, error);
     if (!media_probe(&d->cfg, resolved, &media, error)) return false;
     bool ok = select_media(d, &media, save, transition, error);
-    free(media.path);
+    media_free(&media);
     return ok;
+}
+
+static Media *
+migrated_selection(Daemon *d, const char *path)
+{
+    // A legacy file moved into a package in the same directory retains its selection.
+    const char *name = filename(path);
+    size_t parent = (size_t)(name - path);
+    Media *match = NULL;
+    for (size_t i = 0; i < d->library.count; ++i) {
+        Media *m = &d->library.items[i];
+        if (!m->package || (size_t)(filename(m->path) - m->path) != parent ||
+            strncmp(path, m->path, parent) || strcmp(name, filename(media_file(m)))) continue;
+        if (match) return NULL;
+        match = m;
+    }
+    return match;
 }
 
 static size_t
@@ -256,7 +271,7 @@ static void
 after_set(Daemon *d)
 {
     if (d->current.path)
-        hook_run(d->cfg.after_set, d->current.path, d->current.video ? "video" : "image", false);
+        hook_run(d->cfg.after_set, &d->current, false);
 }
 
 static bool
@@ -292,6 +307,16 @@ reapply(Daemon *d, bool force, char *error)
         return true;
     }
     if (wanted && select_path(d, wanted, false, false, error)) return true;
+    if (*d->state.path && access(d->state.path, F_OK) && errno == ENOENT) {
+        Media *package = migrated_selection(d, d->state.path);
+        if (package) {
+            bool applied = select_media(d, package, false, false, error);
+            strcpy(d->state.path, package->path);
+            if (!state_write(d->paths, &d->state))
+                snprintf(d->notice, sizeof d->notice, "Could not save the wallpaper package selection.");
+            if (applied) return true;
+        }
+    }
     if (wanted && shuffle(d, false, false, error)) return true;
     if (!wanted) return true;
     if (d->current.path) d->dirty = d->publish = true;
@@ -468,7 +493,7 @@ draw(Daemon *d, uint64_t now, bool force)
     double delta = fmin(now - d->last_tick, 250);
     d->last_tick = now;
     const Config *cfg = &d->cfg;
-    bool video = d->current.video;
+    bool video = d->current.type == MEDIA_VIDEO;
     bool blank = cfg->idle_pause && d->blanked;
     bool suspended = blank || d->state.inhibited;
     bool drift_enabled = cfg->parallax && cfg->travel && !suspended && !video;
@@ -507,11 +532,19 @@ status_json(Daemon *d, FILE *out)
         video_speed = fmax(video_speed, video_rate(&d->players[i], d->cfg.video_ramp_power));
     }
     fputs("{\"schema\":1,\"wallpaper\":", out);
+    if (d->current.path) json_string(out, media_file(&d->current)); else fputs("null", out);
+    fputs(",\"path\":", out);
     if (d->current.path) json_string(out, d->current.path); else fputs("null", out);
+    fputs(",\"package\":", out);
+    if (d->current.package) json_string(out, d->current.path); else fputs("null", out);
+    fputs(",\"title\":", out);
+    if (d->current.path) json_string(out, media_title(&d->current)); else fputs("null", out);
     fputs(",\"selection\":", out);
     if (*d->state.path) json_string(out, d->state.path); else fputs("null", out);
     fputs(",\"kind\":", out);
-    if (d->current.path) json_string(out, d->current.video ? "video" : "image"); else fputs("null", out);
+    if (d->current.path) json_string(out, media_kind(&d->current)); else fputs("null", out);
+    fputs(",\"playback_speed\":", out);
+    if (d->current.type == MEDIA_VIDEO) fprintf(out, "%.8g", media_speed(&d->current)); else fputs("null", out);
     fprintf(out, ",\"paused\":%s,\"inhibited\":%s,\"occupied\":%s,\"blanked\":%s,"
                  "\"video_speed\":%.3f,\"parallax_speed\":%.3f,\"changed_at\":%lld,\"rotation\":",
             d->state.paused ? "true" : "false", d->state.inhibited ? "true" : "false",
@@ -535,6 +568,39 @@ status_json(Daemon *d, FILE *out)
 }
 
 static void
+package_json(const Media *m, FILE *out)
+{
+    const MediaPackage *p = m->package;
+    fputs(",\"media\":", out); json_string(out, media_file(m));
+    fputs(",\"title\":", out); json_string(out, media_title(m));
+    fputs(",\"thumbnail\":", out);
+    if (p && *p->thumbnail) json_string(out, p->thumbnail); else fputs("null", out);
+    fputs(",\"packaged\":", out); fputs(p ? "true" : "false", out);
+    fputs(",\"playback_speed\":", out);
+    if (m->type == MEDIA_VIDEO) fprintf(out, "%.8g", media_speed(m)); else fputs("null", out);
+    fputs(",\"tags\":[", out);
+    if (p) {
+        char tags[sizeof p->tags], *rest = NULL;
+        strcpy(tags, p->tags);
+        bool comma = false;
+        for (char *t = strtok_r(tags, ",", &rest); t; t = strtok_r(NULL, ",", &rest)) {
+            t = ini_trim(t);
+            if (!*t) continue;
+            if (comma) fputc(',', out);
+            json_string(out, t);
+            comma = true;
+        }
+    }
+    fputc(']', out);
+    if (p) {
+        fputs(",\"description\":", out); json_string(out, p->description);
+        fputs(",\"author\":", out); json_string(out, p->author);
+        fputs(",\"source\":", out); json_string(out, p->source);
+        fputs(",\"license\":", out); json_string(out, p->license);
+    }
+}
+
+static void
 list_media(Daemon *d, FILE *out, bool json)
 {
     if (json) fputs("{\"schema\":1,\"wallpapers\":[", out);
@@ -550,8 +616,9 @@ list_media(Daemon *d, FILE *out, bool json)
         fputs("{\"path\":", out);
         json_string(out, m->path);
         fprintf(out, ",\"kind\":\"%s\",\"width\":%d,\"height\":%d,\"eligible\":%s,\"reason\":",
-                m->video ? "video" : "image", m->w, m->h, ready ? "true" : "false");
+                media_kind(m), m->w, m->h, ready ? "true" : "false");
         if (ready) fputs("null", out); else json_string(out, reason);
+        package_json(m, out);
         fputc('}', out);
     }
     if (json) fputs("]}\n", out);
@@ -604,7 +671,7 @@ request(Daemon *d, const char *cmd, const char *arg, char *error)
             if (!shuffle(d, true, false, error) && !d->current.path) return false;
         if (d->current.path) {
             draw(d, now_ms(), true);
-            if (!hook_run(d->cfg.after_login, d->current.path, d->current.video ? "video" : "image", true)) {
+            if (!hook_run(d->cfg.after_login, &d->current, true)) {
                 snprintf(error, ERROR_SIZE, "Wallpaper restored. The login hook exited with an error.");
                 return false;
             }
@@ -638,7 +705,9 @@ serve(Daemon *d, int server)
     if (!strcmp(cmd, "status")) {
         fputs("0\n", out);
         if (json) status_json(d, out);
-        else fprintf(out, "%s\n", d->current.path ? d->current.path : "");
+        else if (d->current.path)
+            fprintf(out, "%s\n", arg && !strcmp(arg, "--path") ? d->current.path : media_file(&d->current));
+        else fputc('\n', out);
     } else if (!strcmp(cmd, "list")) {
         fputs("0\n", out);
         list_media(d, out, json);
@@ -765,7 +834,7 @@ done:
     if (lockfd >= 0) close(lockfd);
     clear_playback(&d);
     library_free(&d.library);
-    free(d.current.path);
+    media_free(&d.current);
     x11_close(&d.x);
     return rc;
 }

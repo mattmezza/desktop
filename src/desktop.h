@@ -95,11 +95,21 @@ typedef struct {
     unsigned char *rgba;
 } Image;
 
+typedef enum { MEDIA_ANY, MEDIA_IMAGE, MEDIA_VIDEO } MediaType;
+
+typedef struct {
+    char file[PATH_MAX], thumbnail[PATH_MAX];
+    char title[256], tags[512], description[1024], author[256], source[1024], license[256];
+    double speed;
+} MediaPackage;
+
 typedef struct {
     char *path;
+    MediaPackage *package;
+    MediaType type;
     int w, h;
     double sar;
-    bool video, failed, used;
+    bool failed, used;
     struct timespec modified;
     Image thumb;
     bool thumb_done;
@@ -128,12 +138,24 @@ bool state_read(const Paths *, State *);
 bool state_write(const Paths *, const State *);
 bool atomic_replace(const char *, const void *, size_t, mode_t);
 void json_string(FILE *, const char *);
+char *ini_trim(char *);
 uint64_t now_ms(void);
 const char *filename(const char *);
 extern const char *const rotation_names[];
 
 bool media_probe(const Config *, const char *, Media *, char *);
 bool media_decode(const Config *, const Media *, int, Image *, char *);
+bool media_thumbnail(const Config *, const Media *, Image *, char *);
+bool media_copy(Media *, const Media *);
+void media_free(Media *);
+const char *media_file(const Media *);
+const char *media_title(const Media *);
+const char *media_kind(const Media *);
+double media_speed(const Media *);
+bool media_matches(const Media *, MediaType, const char *);
+bool package_exists(const char *);
+bool package_read(const char *, Media *, char *);
+bool package_create(const Config *, const char *, const char *, char *);
 void image_free(Image *);
 bool library_read(const Config *, Library *, char *);
 void library_free(Library *);
@@ -141,7 +163,7 @@ bool media_eligible(const Config *, const Layout *, const Media *, char *);
 void media_crop(const Config *, const Media *, int, int, double *, double *, double *, double *);
 int video_spawn(const Config *, const Media *, const Output *, Image *, pid_t *);
 void child_stop(pid_t);
-bool hook_run(const char *, const char *, const char *, bool);
+bool hook_run(const char *, const Media *, bool);
 
 int daemon_run(const Paths *, int);
 bool daemon_start(const Paths *, char *);

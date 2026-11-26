@@ -113,8 +113,8 @@ atomic_replace(const char *path, const void *buf, size_t count, mode_t mode)
     return false;
 }
 
-static char *
-trim(char *s)
+char *
+ini_trim(char *s)
 {
     while (isspace((unsigned char)*s)) ++s;
     size_t n = strlen(s);
@@ -190,22 +190,22 @@ assign(Config *cfg, const Option *o, const char *value)
 static const Option *
 parse_line(char *line, char section[64], const char **value)
 {
-    char *s = trim(line);
+    char *s = ini_trim(line);
     if (!*s || *s == '#' || *s == ';') return NULL;
     if (*s == '[') {
         char *end = strrchr(s, ']');
         section[0] = '\0';
-        if (end && !*trim(end + 1)) {
+        if (end && !*ini_trim(end + 1)) {
             *end = '\0';
-            copy_value(section, 64, trim(s + 1));
+            copy_value(section, 64, ini_trim(s + 1));
         }
         return NULL;
     }
     char *eq = strchr(s, '=');
     if (!eq) return NULL;
     *eq = '\0';
-    *value = trim(eq + 1);
-    return find_option(section, trim(s));
+    *value = ini_trim(eq + 1);
+    return find_option(section, ini_trim(s));
 }
 
 bool

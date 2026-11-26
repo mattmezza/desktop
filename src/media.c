@@ -1,4 +1,5 @@
 #include "desktop.h"
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <jpeglib.h>
@@ -41,6 +42,77 @@ image_free(Image *image)
 {
     free(image->rgba);
     *image = (Image){0};
+}
+
+void
+media_free(Media *m)
+{
+    free(m->path);
+    free(m->package);
+    image_free(&m->thumb);
+    *m = (Media){0};
+}
+
+bool
+media_copy(Media *result, const Media *source)
+{
+    Media m = *source;
+    m.thumb = (Image){0};
+    m.path = strdup(source->path);
+    m.package = source->package ? malloc(sizeof *m.package) : NULL;
+    if (!m.path || (source->package && !m.package)) { media_free(&m); return false; }
+    if (m.package) *m.package = *source->package;
+    *result = m;
+    return true;
+}
+
+const char *
+media_file(const Media *m)
+{
+    return m->package ? m->package->file : m->path;
+}
+
+const char *
+media_title(const Media *m)
+{
+    return m->package && *m->package->title ? m->package->title : filename(m->path);
+}
+
+const char *
+media_kind(const Media *m)
+{
+    return m->type == MEDIA_VIDEO ? "video" : "image";
+}
+
+double
+media_speed(const Media *m)
+{
+    return m->package ? m->package->speed : 1;
+}
+
+bool
+media_matches(const Media *m, MediaType type, const char *query)
+{
+    if (type != MEDIA_ANY && m->type != type) return false;
+    const MediaPackage *p = m->package;
+    const char *fields[] = {media_title(m), filename(media_file(m)), filename(m->path), media_kind(m),
+                            p ? p->tags : "", p ? p->description : "", p ? p->author : "", p ? p->source : "",
+                            p ? p->license : ""};
+    while (*query) {
+        while (isspace((unsigned char)*query)) ++query;
+        size_t n = strcspn(query, " \t\r\n");
+        if (!n) break;
+        char word[256];
+        if (n >= sizeof word) return false;
+        memcpy(word, query, n);
+        word[n] = '\0';
+        bool found = false;
+        for (size_t i = 0; i < sizeof fields / sizeof *fields && !found; ++i)
+            found = strcasestr(fields[i], word) != NULL;
+        if (!found) return false;
+        query += n;
+    }
+    return true;
 }
 
 static bool
@@ -326,18 +398,27 @@ media_probe(const Config *cfg, const char *path, Media *m, char *error)
 {
     *m = (Media){.sar = 1};
     struct stat st;
-    if (stat(path, &st) || !S_ISREG(st.st_mode)) {
-        snprintf(error, ERROR_SIZE, "File is missing or is not a regular file.");
+    if (stat(path, &st) || (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))) {
+        snprintf(error, ERROR_SIZE, "Could not open a wallpaper file or package.");
         return false;
     }
-    m->video = is_video(path);
-    bool ok = m->video ? probe_video(cfg, path, m, error) : read_picture(path, 0, m, NULL);
-    if (!ok && !m->video) snprintf(error, ERROR_SIZE, "Unreadable or unsupported image.");
-    if (!ok) return false;
+    if (S_ISDIR(st.st_mode)) {
+        if (!package_read(path, m, error)) return false;
+    } else m->type = is_video(path) ? MEDIA_VIDEO : MEDIA_IMAGE;
+    const char *file = m->package ? m->package->file : path;
+    bool video = m->type == MEDIA_VIDEO;
+    bool ok = video ? probe_video(cfg, file, m, error) : read_picture(file, 0, m, NULL);
+    if (!ok) {
+        if (!video) snprintf(error, ERROR_SIZE, "Unreadable or unsupported image.");
+        media_free(m);
+        return false;
+    }
     m->path = strdup(path);
     m->modified = st.st_mtim;
-    if (!m->path) snprintf(error, ERROR_SIZE, "Out of memory.");
-    return m->path != NULL;
+    if (m->path) return true;
+    media_free(m);
+    snprintf(error, ERROR_SIZE, "Out of memory.");
+    return false;
 }
 
 static void
@@ -351,8 +432,11 @@ fit_dimensions(double w, int h, int limit, int *width, int *height)
 static int
 video_output(const Config *cfg, const Media *m, int w, int h, const char *crop, pid_t *pid)
 {
-    char filter[192];
-    if (crop)
+    char filter[240];
+    if (crop && media_speed(m) != 1)
+        snprintf(filter, sizeof filter, "settb=AVTB,setpts=(PTS-STARTPTS)/%.8f,fps=%d,%s,scale=%d:%d:flags=bilinear,setsar=1",
+                 media_speed(m), cfg->video_fps, crop, w, h);
+    else if (crop)
         snprintf(filter, sizeof filter, "fps=%d,%s,scale=%d:%d:flags=bilinear,setsar=1", cfg->video_fps, crop, w, h);
     else snprintf(filter, sizeof filter, "scale=%d:%d:flags=bilinear,setsar=1", w, h);
     char *args[48];
@@ -361,7 +445,7 @@ video_output(const Config *cfg, const Media *m, int w, int h, const char *crop, 
     ARG(cfg->ffmpeg); ARG("-nostdin"); ARG("-v"); ARG("error");
     ARG("-threads"); ARG("2"); ARG("-filter_threads"); ARG("1");
     if (crop) { ARG("-stream_loop"); ARG("-1"); }
-    ARG("-i"); ARG(m->path); ARG("-map"); ARG("0:V:0"); ARG("-an"); ARG("-sn"); ARG("-dn");
+    ARG("-i"); ARG(media_file(m)); ARG("-map"); ARG("0:V:0"); ARG("-an"); ARG("-sn"); ARG("-dn");
     ARG("-vf"); ARG(filter);
     if (!crop) { ARG("-frames:v"); ARG("1"); }
     ARG("-pix_fmt"); ARG("rgba"); ARG("-c:v"); ARG("rawvideo"); ARG("-threads"); ARG("1");
@@ -414,7 +498,7 @@ media_decode(const Config *cfg, const Media *m, int max, Image *out, char *error
 {
     bool ok = false;
     *out = (Image){0};
-    if (m->video) {
+    if (m->type == MEDIA_VIDEO) {
         int w, h;
         fit_dimensions(m->w * m->sar, m->h, max ? max : cfg->video_max, &w, &h);
         if (image_alloc(out, w, h)) {
@@ -429,13 +513,24 @@ media_decode(const Config *cfg, const Media *m, int max, Image *out, char *error
         }
     } else {
         Media ignored = {0};
-        ok = read_picture(m->path, max, &ignored, out) && (!max || shrink(out, max));
+        ok = read_picture(media_file(m), max, &ignored, out) && (!max || shrink(out, max));
     }
     if (ok) return true;
     image_free(out);
-    snprintf(error, ERROR_SIZE, "Could not decode %.240s%s.", filename(m->path),
-             m->video ? " with FFmpeg" : "");
+    snprintf(error, ERROR_SIZE, "Could not decode %.240s%s.", filename(media_file(m)),
+             m->type == MEDIA_VIDEO ? " with FFmpeg" : "");
     return false;
+}
+
+bool
+media_thumbnail(const Config *cfg, const Media *m, Image *out, char *error)
+{
+    *out = (Image){0};
+    Media ignored = {0};
+    if (m->package && *m->package->thumbnail && read_picture(m->package->thumbnail, 336, &ignored, out) &&
+        shrink(out, 336)) return true;
+    image_free(out);
+    return media_decode(cfg, m, 336, out, error);
 }
 
 static bool
@@ -455,30 +550,38 @@ scan(const Config *cfg, const char *dir, Library *lib, size_t *capacity, unsigne
         if (n < 0 || n >= (int)sizeof path) continue;
         struct stat st;
         if (lstat(path, &st)) continue;
-        if (S_ISDIR(st.st_mode)) {
-            if (cfg->recursive && depth < 64) ok = scan(cfg, path, lib, capacity, depth + 1, error);
+        bool linked = S_ISLNK(st.st_mode);
+        if (linked && stat(path, &st)) continue;
+        bool package = S_ISDIR(st.st_mode) && package_exists(path);
+        if (S_ISDIR(st.st_mode) && !package) {
+            if (!linked && cfg->recursive && depth < 64) ok = scan(cfg, path, lib, capacity, depth + 1, error);
             continue;
         }
-        if (S_ISLNK(st.st_mode) && stat(path, &st)) continue;
-        if (!S_ISREG(st.st_mode)) continue;
-        bool video = is_video(path);
-        if ((video && !cfg->videos) || (!video && !cfg->images)) continue;
-        if (!video) {
+        if (!package && !S_ISREG(st.st_mode)) continue;
+        bool video = !package && is_video(path);
+        if (!package && ((video && !cfg->videos) || (!video && !cfg->images))) continue;
+        if (!package && !video) {
             const char *ext = strrchr(entry->d_name, '.');
             if (!ext || (strcasecmp(ext, ".jpg") && strcasecmp(ext, ".jpeg") &&
                          strcasecmp(ext, ".png") && strcasecmp(ext, ".webp"))) continue;
         }
         Media m;
-        if (!media_probe(cfg, path, &m, error)) {
-            m.path = strdup(path);
-            m.failed = true;
-            m.modified = st.st_mtim;
+        char resolved[PATH_MAX];
+        const char *reference = linked && realpath(path, resolved) ? resolved : path;
+        if (!media_probe(cfg, reference, &m, error)) {
+            if (package) continue;
+            m = (Media){.path = strdup(reference), .type = video ? MEDIA_VIDEO : MEDIA_IMAGE,
+                        .failed = true, .modified = st.st_mtim};
         }
         if (!m.path) { ok = false; break; }
+        if ((m.type == MEDIA_VIDEO && !cfg->videos) || (m.type == MEDIA_IMAGE && !cfg->images)) {
+            media_free(&m);
+            continue;
+        }
         if (lib->count == *capacity) {
             size_t next = *capacity ? *capacity * 2 : 64;
             Media *items = realloc(lib->items, next * sizeof *items);
-            if (!items) { free(m.path); ok = false; break; }
+            if (!items) { media_free(&m); ok = false; break; }
             lib->items = items;
             *capacity = next;
         }
@@ -492,7 +595,7 @@ static int
 media_compare(const void *a, const void *b)
 {
     const Media *ma = a, *mb = b;
-    int name = strcasecmp(filename(ma->path), filename(mb->path));
+    int name = strcasecmp(media_title(ma), media_title(mb));
     return name ? name : strcmp(ma->path, mb->path);
 }
 
@@ -517,10 +620,7 @@ library_read(const Config *cfg, Library *lib, char *error)
 void
 library_free(Library *lib)
 {
-    for (size_t i = 0; i < lib->count; ++i) {
-        free(lib->items[i].path);
-        image_free(&lib->items[i].thumb);
-    }
+    for (size_t i = 0; i < lib->count; ++i) media_free(&lib->items[i]);
     free(lib->items);
     *lib = (Library){0};
 }
@@ -529,10 +629,10 @@ bool
 media_eligible(const Config *cfg, const Layout *layout, const Media *m, char *reason)
 {
     if (m->failed || !m->w || !m->h) {
-        if (reason) snprintf(reason, ERROR_SIZE, "%s is unreadable.", m->video ? "Video" : "Image");
+        if (reason) snprintf(reason, ERROR_SIZE, "%s is unreadable.", m->type == MEDIA_VIDEO ? "Video" : "Image");
         return false;
     }
-    int margin = !m->video && cfg->parallax ? cfg->travel * 2 : 0;
+    int margin = m->type == MEDIA_IMAGE && cfg->parallax ? cfg->travel * 2 : 0;
     for (size_t i = 0; i < layout->count; ++i) {
         const Output *o = &layout->items[i];
         if (m->w * m->sar < o->w + margin || m->h < o->h + margin) {
@@ -549,7 +649,7 @@ media_crop(const Config *cfg, const Media *m, int w, int h,
            double *x, double *y, double *width, double *height)
 {
     double source_w = m->w * m->sar, source_h = m->h;
-    int travel = !m->video && cfg->parallax ? cfg->travel : 0;
+    int travel = m->type == MEDIA_IMAGE && cfg->parallax ? cfg->travel : 0;
     double scale = fmax((w + travel * 2) / source_w, (h + travel * 2) / source_h);
     *width = w / scale;
     *height = h / scale;
@@ -558,15 +658,17 @@ media_crop(const Config *cfg, const Media *m, int w, int h,
 }
 
 bool
-hook_run(const char *cmd, const char *path, const char *kind, bool wait)
+hook_run(const char *cmd, const Media *m, bool wait)
 {
     if (!*cmd) return true;
     pid_t pid = fork();
     if (pid < 0) return false;
     if (!pid) {
         prctl(PR_SET_PDEATHSIG, SIGTERM);
-        setenv("DESKTOP_WALLPAPER", path, 1);
-        setenv("DESKTOP_MEDIA", kind, 1);
+        setenv("DESKTOP_WALLPAPER", media_file(m), 1);
+        setenv("DESKTOP_MEDIA", media_kind(m), 1);
+        if (m->package) setenv("DESKTOP_PACKAGE", m->path, 1);
+        else unsetenv("DESKTOP_PACKAGE");
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
