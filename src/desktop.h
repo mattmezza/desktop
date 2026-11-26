@@ -33,6 +33,7 @@
     OPTION(INT, parallax_fps, "parallax", "fps", 30, 1, 60) \
     OPTION(BOOL, video_empty, "video", "empty_only", true, 0, 1) \
     OPTION(INT, video_ramp_ms, "video", "ramp_ms", 1000, 0, 5000) \
+    OPTION(INT, video_ramp_power, "video", "ramp_power", 3, 1, 6) \
     OPTION(INT, video_fps, "video", "fps", 24, 1, 60) \
     OPTION(INT, video_max, "video", "max_dimension", 3840, 640, 8192) \
     OPTION(PATH, ffmpeg, "video", "ffmpeg", "desktop-ffmpeg", 0, 0) \

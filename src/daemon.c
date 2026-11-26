@@ -20,7 +20,7 @@ typedef struct {
     Image frame;
     size_t bytes, progress;
     double credit, ramp;
-    bool failed;
+    bool accelerating, failed;
 } Player;
 
 typedef struct {
@@ -321,9 +321,34 @@ approach(double value, double target, double dt, int duration)
 }
 
 static double
-video_rate(double ramp)
+video_rate(const Player *p, int power)
 {
-    return ramp * ramp * (3 - 2 * ramp);
+    return p->accelerating ? pow(p->ramp, power) : 1 - pow(1 - p->ramp, power);
+}
+
+static double
+video_time(Player *p, const Config *cfg, double delta, bool active)
+{
+    int duration = cfg->video_ramp_ms, power = cfg->video_ramp_power;
+    if (!duration) {
+        p->ramp = active ? 1 : 0;
+        p->accelerating = active;
+        return active ? delta : 0;
+    }
+    if (p->accelerating != active) {
+        // Rebase the opposite curve at the current speed when a window toggles mid-ramp.
+        double rate = video_rate(p, power), root = 1.0 / power;
+        p->ramp = active ? pow(rate, root) : 1 - pow(1 - rate, root);
+        p->accelerating = active;
+        return rate * delta;
+    }
+    double phase = active ? p->ramp : 1 - p->ramp;
+    double next = fmin(1, phase + delta / duration);
+    p->ramp = active ? next : 1 - next;
+    // Integrate the speed to get elapsed video time, including any time at full speed.
+    double span = (next - phase) * duration;
+    double area = (pow(next, power + 1) - pow(phase, power + 1)) * duration / (power + 1);
+    return active ? area + fmax(0, delta - span) : fmax(0, span - area);
 }
 
 static bool
@@ -336,18 +361,13 @@ advance_video(Daemon *d, size_t i, double delta, bool active, bool suspended)
         p->credit = 0;
         return false;
     }
-    double before = video_rate(p->ramp);
-    int duration = d->cfg.video_ramp_ms;
-    if (!duration) p->ramp = active ? 1 : 0;
-    else p->ramp = fmax(0, fmin(1, p->ramp + (active ? delta : -delta) / duration));
-    if (p->ramp == 0) {
+    double elapsed = video_time(p, &d->cfg, delta, active);
+    if (!active && p->ramp == 0) {
         p->credit = fmin(p->credit, 0.99);
         return false;
     }
     if (!player_open(d, i)) return false;
-    double rate = video_rate(p->ramp);
-    double average = duration ? (before + rate) / 2 : rate;
-    p->credit = fmin(1.5, p->credit + delta * d->cfg.video_fps * average / 1000);
+    p->credit = fmin(1.5, p->credit + elapsed * d->cfg.video_fps / 1000);
     // Keep one decoded frame ready so the ramp can control presentation timing.
     if (p->credit >= 1 && p->progress == p->bytes) {
         if (!x11_video_frame(&d->x, i, &p->frame, &d->cfg)) {
@@ -416,7 +436,7 @@ status_json(Daemon *d, FILE *out)
     double parallax_speed = 0, video_speed = 0;
     for (size_t i = 0; i < d->x.layout.count; ++i) {
         parallax_speed = fmax(parallax_speed, d->parallax_speed[i]);
-        video_speed = fmax(video_speed, video_rate(d->players[i].ramp));
+        video_speed = fmax(video_speed, video_rate(&d->players[i], d->cfg.video_ramp_power));
     }
     fputs("{\"schema\":1,\"wallpaper\":", out);
     if (d->current.path) json_string(out, d->current.path); else fputs("null", out);
@@ -439,7 +459,7 @@ status_json(Daemon *d, FILE *out)
         fprintf(out, ",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d,\"occupied\":%s,"
                      "\"parallax_speed\":%.3f,\"video_speed\":%.3f}",
                 o->x, o->y, o->w, o->h, d->occupied & (UINT32_C(1) << i) ? "true" : "false",
-                d->parallax_speed[i], video_rate(d->players[i].ramp));
+                d->parallax_speed[i], video_rate(&d->players[i], d->cfg.video_ramp_power));
     }
     fputs("],\"notice\":", out);
     if (*d->notice) json_string(out, d->notice); else fputs("null", out);
