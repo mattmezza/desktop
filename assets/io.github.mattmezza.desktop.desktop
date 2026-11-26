@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Desktop
+Comment=Choose and rotate desktop wallpapers
+Exec=desktop
+Icon=io.github.mattmezza.desktop
+Terminal=false
+Type=Application
+Categories=Settings;DesktopSettings;
+Keywords=wallpaper;background;appearance;parallax;video;
+StartupWMClass=Desktop
