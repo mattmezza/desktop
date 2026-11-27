@@ -1232,6 +1232,7 @@ ui_run(const Paths *paths)
     bool worker_ready = false;
     int rc = 1;
     if (!config_read(paths, &e->cfg, error) || !x11_open(&e->x, error)) goto done;
+    e->suitable_only = e->cfg.hide_unsuitable;
     Atom singleton = XInternAtom(e->x.d, "_DESKTOP_SETTINGS_INSTANCE", False);
     Window existing = XGetSelectionOwner(e->x.d, singleton);
     if (existing) {

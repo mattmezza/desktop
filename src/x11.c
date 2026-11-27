@@ -171,6 +171,15 @@ intersects(const Output *o, int x, int y, int w, int h)
     return x < o->x + o->w && y < o->y + o->h && x + w > o->x && y + h > o->y;
 }
 
+static void
+drop_fade(X11 *x)
+{
+    if (x->fade_from_pic) XRenderFreePicture(x->d, x->fade_from_pic);
+    if (x->fade_from) XFreePixmap(x->d, x->fade_from);
+    x->fade_from_pic = None;
+    x->fade_from = None;
+}
+
 bool
 x11_scene(X11 *x, const Layout *layout, const Config *cfg)
 {
@@ -194,6 +203,7 @@ x11_scene(X11 *x, const Layout *layout, const Config *cfg)
         x->live = XCreateWindow(d, x->root, 0, 0, (unsigned)layout->w, (unsigned)layout->h, 0,
                                 x->depth, InputOutput, x->visual,
                                 CWOverrideRedirect | CWEventMask | CWBackPixmap | CWBackingStore, &wa);
+        x->live_pic = XRenderCreatePicture(d, x->live, x->format, 0, NULL);
         x11_window_class(d, x->live, "desktop-background", "DesktopBackground");
         XStoreName(d, x->live, "Desktop wallpaper");
         XChangeProperty(d, x->live, x->type, XA_ATOM, 32, PropModeReplace, (unsigned char *)&x->desktop, 1);
@@ -209,10 +219,9 @@ x11_scene(X11 *x, const Layout *layout, const Config *cfg)
     } else XResizeWindow(d, x->live, (unsigned)layout->w, (unsigned)layout->h);
     if (x->canvas_pic) XRenderFreePicture(d, x->canvas_pic);
     if (x->canvas) XFreePixmap(d, x->canvas);
-    if (x->former_pic) XRenderFreePicture(d, x->former_pic);
-    if (x->former) XFreePixmap(d, x->former);
-    x->former = None;
-    x->former_pic = None;
+    drop_fade(x);
+    x->outgoing = false;
+    x->opacity = 1;
     x->canvas_w = layout->w;
     x->canvas_h = layout->h;
     x->canvas = XCreatePixmap(d, x->root, (unsigned)layout->w, (unsigned)layout->h, (unsigned)x->depth);
@@ -352,14 +361,17 @@ x11_video_frame(X11 *x, size_t i, const Image *image, const Config *cfg)
     return true;
 }
 
-void
+double
 x11_capture(X11 *x)
 {
-    if (!x->former) {
-        x->former = XCreatePixmap(x->d, x->root, (unsigned)x->layout.w, (unsigned)x->layout.h, (unsigned)x->depth);
-        x->former_pic = XRenderCreatePicture(x->d, x->former, x->format, 0, NULL);
+    if (x->outgoing) return x->opacity;
+    unsigned w = (unsigned)x->layout.w, h = (unsigned)x->layout.h;
+    if (!x->fade_from) {
+        x->fade_from = XCreatePixmap(x->d, x->root, w, h, (unsigned)x->depth);
+        x->fade_from_pic = XRenderCreatePicture(x->d, x->fade_from, x->format, 0, NULL);
     }
-    XCopyArea(x->d, x->canvas, x->former, x->gc, 0, 0, (unsigned)x->layout.w, (unsigned)x->layout.h, 0, 0);
+    XCopyArea(x->d, x->canvas, x->fade_from, x->gc, 0, 0, w, h, 0, 0);
+    return x->opacity;
 }
 
 static void
@@ -410,7 +422,7 @@ pixel_offset(double target, int previous)
 
 void
 x11_paint(X11 *x, const Config *cfg, const Media *media, const double *dx,
-          const double *dy, const double *blur_radius, double fade, bool full)
+          const double *dy, const double *blur_radius, double opacity, bool outgoing, bool full)
 {
     if (!x->source) return;
     Display *d = x->d;
@@ -443,11 +455,10 @@ x11_paint(X11 *x, const Config *cfg, const Media *media, const double *dx,
             if (o->y + o->h > bottom) bottom = o->y + o->h;
         }
     }
-    if (!full && (left >= right || top >= bottom)) return;
     for (size_t i = 0; i < l->count; ++i) {
         const Output *o = &l->items[i];
         Viewport *v = &x->viewports[i];
-        if (!full && !x->overlaps && !(updates & (UINT32_C(1) << i))) continue;
+        if (!full && (!updates || (!x->overlaps && !(updates & (UINT32_C(1) << i))))) continue;
         int sx = padding + v->dx, sy = padding + v->dy;
         int w = o->w + 2 * padding, h = o->h + 2 * padding;
         if (v->blur_radius >= BLUR_MIN_RADIUS) {
@@ -464,21 +475,30 @@ x11_paint(X11 *x, const Config *cfg, const Media *media, const double *dx,
         else render_crop(x, x->canvas_pic, cfg, media, o, o->x, o->y, 0);
         if (v->blur_radius > 0) x11_blur_paint(x, v, o, sx, sy, w, h, cfg->blur_radius);
     }
-    if (fade > 0 && x->former_pic) {
-        XRenderColor color = {.alpha = (unsigned short)(fade * 65535)};
-        Picture alpha = XRenderCreateSolidFill(x->d, &color);
-        XRenderComposite(x->d, PictOpOver, x->former_pic, alpha, x->canvas_pic, 0, 0, 0, 0, 0, 0,
-                         (unsigned)l->w, (unsigned)l->h);
-        XRenderFreePicture(x->d, alpha);
-    }
+    bool fading = outgoing || opacity < 1;
+    full |= fading || x->outgoing || x->opacity < 1;
+    if (!full && (left >= right || top >= bottom)) return;
     if (!x->live_mapped) {
         XLowerWindow(d, x->live);
         XMapWindow(d, x->live);
         x->live_mapped = true;
     }
-    if (full) { left = top = 0; right = l->w; bottom = l->h; }
-    XCopyArea(d, x->canvas, x->live, x->gc, left, top, (unsigned)(right - left),
-              (unsigned)(bottom - top), left, top);
+    if (fading) {
+        // Apply the fade as a single XRender operation. Keep the canvas undimmed for effects and root snapshots.
+        Picture source = outgoing ? x->fade_from_pic : x->canvas_pic;
+        XRenderColor color = {.alpha = (unsigned short)lround(opacity * 65535)};
+        Picture alpha = XRenderCreateSolidFill(d, &color);
+        XRenderComposite(d, PictOpSrc, source, alpha, x->live_pic, 0, 0, 0, 0, 0, 0,
+                         (unsigned)l->w, (unsigned)l->h);
+        XRenderFreePicture(d, alpha);
+    } else {
+        if (full) { left = top = 0; right = l->w; bottom = l->h; }
+        XCopyArea(d, x->canvas, x->live, x->gc, left, top, (unsigned)(right - left),
+                  (unsigned)(bottom - top), left, top);
+        drop_fade(x);
+    }
+    x->outgoing = outgoing;
+    x->opacity = opacity;
     XFlush(d);
 }
 

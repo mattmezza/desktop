@@ -125,6 +125,7 @@ ini_trim(char *s)
 static const Option *
 find_option(const char *section, const char *key)
 {
+    if (!strcmp(section, "layout") && !strcmp(key, "crossfade_ms")) key = "fade_ms";
     for (size_t i = 0; i < NOPTIONS; ++i)
         if (!strcmp(options[i].section, section) && !strcmp(options[i].key, key))
             return &options[i];

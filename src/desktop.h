@@ -25,7 +25,7 @@
     OPTION(INT, focal_x, "layout", "focal_x", 50, 0, 100) \
     OPTION(INT, focal_y, "layout", "focal_y", 50, 0, 100) \
     OPTION(COLOR, background, "layout", "background", "#0D0E0F", 0, 0) \
-    OPTION(INT, crossfade_ms, "layout", "crossfade_ms", 180, 0, 1500) \
+    OPTION(INT, fade_ms, "layout", "fade_ms", 480, 0, 5000) \
     OPTION(BOOL, parallax, "parallax", "enabled", true, 0, 1) \
     OPTION(BOOL, parallax_empty, "parallax", "empty_only", true, 0, 1) \
     OPTION(INT, travel, "parallax", "travel_px", 5, 0, 160) \
@@ -54,6 +54,7 @@
     OPTION(INT, height, "ui", "height", 650, 460, 1100) \
     OPTION(INT, corner_radius, "ui", "corner_radius", -1, -1, 40) \
     OPTION(INT, animation_ms, "ui", "animation_ms", 130, 0, 500) \
+    OPTION(BOOL, hide_unsuitable, "ui", "hide_unsuitable", true, 0, 1) \
     OPTION(COLOR, ui_background, "ui", "background", "", 0, 0) \
     OPTION(COLOR, panel, "ui", "panel", "", 0, 0) \
     OPTION(COLOR, foreground, "ui", "foreground", "", 0, 0) \

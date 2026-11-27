@@ -12,7 +12,7 @@ Install or upgrade the latest release for Linux x86-64 or ARM64.
 curl -fsSL https://raw.githubusercontent.com/mattmezza/desktop/main/install.sh | sh
 ```
 
-The installer verifies the release checksum and installs into `~/.local` by default. Set `PREFIX` to install elsewhere, or `DESKTOP_VERSION=v0.1.4` to pin a release. Put the installation's `bin` directory on your PATH. The archive includes static Desktop, FFmpeg, and FFprobe executables. It preserves existing configuration on upgrades.
+The installer verifies the release checksum and installs into `~/.local` by default. Set `PREFIX` to install elsewhere, or `DESKTOP_VERSION=v0.1.5` to pin a release. Put the installation's `bin` directory on your PATH. The archive includes static Desktop, FFmpeg, and FFprobe executables. It preserves existing configuration on upgrades.
 
 For a source build, install a C toolchain, pkg-config, Xlib, XRandR, XRender, XFixes, Xext, XScreenSaver, FreeType, HarfBuzz, libpng, libjpeg-turbo, and libwebp development files. CUI and the Geist faces are bundled. Use `ffmpeg` and `ffprobe` from PATH for video.
 
@@ -24,7 +24,7 @@ make install PREFIX="$HOME/.local"
 
 ## Use
 
-Run `desktop` to browse and apply wallpapers. Select a tile to see the crop on each active output, then choose **Set wallpaper**. **Shuffle** applies a new eligible wallpaper. Filter by **Images** or **Videos**, or check **Hide unsuitable** to show only wallpapers that fit your connected displays and current effects settings. Search by title, filename, tags, description, or credits. Each search word can match a different field. Use the page arrows or scroll wheel to browse, and press **Esc** to go back or close.
+Run `desktop` to browse and apply wallpapers. Select a tile to see the crop on each active output, then choose **Set wallpaper**. **Shuffle** applies a new eligible wallpaper. Filter by **Images** or **Videos**. **Hide unsuitable** starts checked and shows only wallpapers that fit your connected displays and current effects settings. Clear it to see the entire library, or set `ui.hide_unsuitable = false` to start with it cleared. Search by title, filename, tags, description, or credits. Each search word can match a different field. Use the page arrows or scroll wheel to browse, and press **Esc** to go back or close.
 
 In **Settings…**, choose your folder and rotation schedule. Rotation can be manual, once at X login, every N minutes, or once per local calendar day. Open **Effects…** to control wallpaper blur, pointer parallax, and when videos play.
 
@@ -94,6 +94,7 @@ Copy [config.ini](config.ini) to `${XDG_CONFIG_HOME:-$HOME/.config}/desktop/conf
 
 Empty theme values inherit `desktop.*` Xresources, the mwm palette, then the bundled defaults. Use `desktop.background`, `desktop.panel`, `desktop.foreground`, `desktop.muted`, `desktop.border`, `desktop.accent`, `desktop.onAccent`, `desktop.cornerRadius`, `desktop.font`, or `desktop.mono`. Explicit INI values take priority. The bundled fonts are Geist and Geist Mono.
 
+- **Wallpaper switching** fades through black using XRender, which can use GPU acceleration when your X11 driver supports it. `layout.fade_ms` sets the total duration for both halves. It defaults to 480 ms and accepts 0 to switch immediately. Existing `layout.crossfade_ms` settings are read as the same duration.
 - **Wallpaper blur** softens images and videos behind open windows and reveals the sharp wallpaper when the display is empty. Both directions start slowly and accelerate toward the end. The default is a 24 px Gaussian blur with a 1.5-second transition. Adjust `blur.radius_px`, `blur.transition_ms`, or `blur.easing_power` (1 for linear, 3 for cubic).
 - **Pointer parallax** filters quick cursor reversals and retains the displayed pixel position during small movements. By default it travels up to 5 px from center on each axis at up to 15 px/s. Tune `parallax.travel_px`, `parallax.ease_ms`, and `parallax.max_speed_px_s`. With **Only on an empty desktop** enabled, it settles back to center on occupied outputs.
 - **Video playback** eases to a stop on occupied outputs and gradually resumes from the held frame when **Only on an empty desktop** is enabled. `video.ramp_ms` sets the duration and `video.ramp_power` sets the easing strength from 1 (linear) to 6 (strongest), with 3 (cubic) by default.

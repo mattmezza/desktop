@@ -101,6 +101,7 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
     desktop("config", "set", "rotation.mode", "manual")
     desktop("config", "set", "layout.crossfade_ms", "60")
     assert (config / "config.ini").is_symlink() and "# stowed marker" in cfg.read_text()
+    assert "fade_ms = 60" in cfg.read_text()
     assert desktop("config", "set", "ui.corner_radius", 61, check=False).returncode != 0
     assert desktop("config", "set", "blur.easing_power", 7, check=False).returncode != 0
     run("xset", "s", "off")
@@ -128,6 +129,34 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         assert {o["name"] for o in docked["outputs"]} == {"Wide", "Laptop"}
         assert docked["wallpaper"] == str(first) and docked["changed_at"] == snapshot["changed_at"]
         until(lambda: x.read(1300, 700) == 0x0D0E0F)
+        # Keep a legacy duration in the file and verify the actual pixels throughout the switch.
+        cfg.write_text(cfg.read_text().replace("fade_ms = 60", "crossfade_ms = 800"))
+        desktop("reload")
+        incoming = tmp / "Incoming.png"
+        incoming.write_bytes(second.read_bytes())
+        places = ((200, 340), (250, 720))
+        old, new = 0xEC1C3E, 0x2EA153
+        until(lambda: all(x.read(*pos) == old for pos in places))
+        start = time.monotonic()
+        desktop("set", incoming)
+        samples = []
+        while time.monotonic() - start < 2:
+            pixels = tuple(x.read(*pos) for pos in places)
+            samples.append(pixels)
+            if pixels == (new, new):
+                break
+            time.sleep(.01)
+        assert samples[-1] == (new, new)
+        assert time.monotonic() - start >= .75
+        black = samples.index((0, 0))
+        assert any(0 < (a >> 16) < 220 and (a >> 16) > (a >> 8 & 255)
+                   for a, b in samples[:black] if a == b), samples
+        assert any(0 < (a >> 8 & 255) < 150 and (a >> 8 & 255) > (a >> 16)
+                   for a, b in samples[black + 1:] if a == b), samples
+        desktop("config", "set", "layout.fade_ms", 0)
+        desktop("set", first)
+        until(lambda: all(x.read(*pos) == old for pos in places))
+        desktop("config", "set", "layout.fade_ms", 60)
         if not wm:
             run("xdotool", "mousemove", "720", "240")
             until(lambda: x.read(710, 325) == 0xEC1C3E and x.read(560, 680) == 0xEC1C3E)
@@ -371,11 +400,13 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         def has_tile():
             return x.read(74, 392, int(wid)) != x.read(305, 392, int(wid))
 
+        until(lambda: not has_tile())
+        time.sleep(.15)
+        assert not has_tile()
+        run("xdotool", "mousemove", "--window", wid, "235", "341", "click", "1")
         until(has_tile)
         run("xdotool", "mousemove", "--window", wid, "235", "341", "click", "1")
         until(lambda: not has_tile())
-        run("xdotool", "mousemove", "--window", wid, "235", "341", "click", "1")
-        until(has_tile)
         time.sleep(.5)
         run("xdotool", "mousemove", "--window", wid, "810", "34", "click", "1")
         time.sleep(.35)
@@ -402,7 +433,7 @@ with tempfile.TemporaryDirectory(prefix="desktop-check-") as name:
         restored = status()
         assert restored["selection"] == str(migrated) and restored["path"] == str(migrated)
         assert restored["changed_at"] == previous["changed_at"]
-        print("X11 checks passed: crop, rotation, effects, packages, video speed, filter, search, and settings.")
+        print("X11 checks passed: crop, fade, rotation, effects, packages, video speed, filter, search, and settings.")
     finally:
         desktop("stop", check=False)
         x.close(x.d)

@@ -44,13 +44,14 @@ typedef struct {
     XRenderPictFormat *format;
     GC gc;
     Layout layout;
-    Pixmap canvas, snapshot, former, source;
-    Picture canvas_pic, former_pic, source_pic;
+    Pixmap canvas, snapshot, fade_from, source;
+    Picture live_pic, canvas_pic, fade_from_pic, source_pic;
     Upload upload;
     int source_w, source_h, canvas_w, canvas_h;
     Viewport viewports[MAX_OUTPUTS];
     uint32_t video_updates;
-    bool live_mapped, crops_valid, overlaps;
+    double opacity;
+    bool live_mapped, crops_valid, overlaps, outgoing;
 } X11;
 
 bool x11_open(X11 *, char *);
@@ -60,8 +61,8 @@ bool x11_scene(X11 *, const Layout *, const Config *);
 bool x11_upload(X11 *, const Image *, const Config *);
 bool x11_video_frame(X11 *, size_t, const Image *, const Config *);
 void x11_clear_video(X11 *);
-void x11_capture(X11 *);
-void x11_paint(X11 *, const Config *, const Media *, const double *, const double *, const double *, double, bool);
+double x11_capture(X11 *);
+void x11_paint(X11 *, const Config *, const Media *, const double *, const double *, const double *, double, bool, bool);
 void x11_publish(X11 *);
 bool x11_owns_background(X11 *);
 void x11_pointer(X11 *, int *, int *);

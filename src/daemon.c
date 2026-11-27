@@ -40,8 +40,9 @@ typedef struct {
     double parallax_speed[MAX_OUTPUTS], blur_radius[MAX_OUTPUTS];
     BlurTransition blur[MAX_OUTPUTS];
     uint64_t fade_start, layout_due, inspect_at, paint_at, last_tick, retry_at;
+    double fade_from_opacity;
     uint32_t occupied;
-    bool drifting, playing, blurring, blur_ready, blanked, logged_in, dirty, publish, stop;
+    bool drifting, playing, blurring, blur_ready, fade_revealed, blanked, logged_in, dirty, publish, stop;
     char notice[ERROR_SIZE];
 } Daemon;
 
@@ -156,11 +157,10 @@ select_media(Daemon *d, Media *media, bool update_state, bool transition, char *
         media->failed = true;
         return false;
     }
-    bool fade = transition && d->current.path && d->cfg.crossfade_ms &&
+    bool fade = transition && d->x.live_mapped && d->current.path && d->cfg.fade_ms &&
                 strcmp(media->path, d->current.path) != 0;
     Media selected;
     if (!media_copy(&selected, media)) { image_free(&picture); snprintf(error, ERROR_SIZE, "Out of memory."); return false; }
-    if (fade) x11_capture(&d->x);
     bool ok = x11_upload(&d->x, &picture, &d->cfg);
     image_free(&picture);
     if (!ok) {
@@ -168,6 +168,7 @@ select_media(Daemon *d, Media *media, bool update_state, bool transition, char *
         snprintf(error, ERROR_SIZE, "Could not upload the wallpaper pixels.");
         return false;
     }
+    if (fade) d->fade_from_opacity = x11_capture(&d->x);
     clear_playback(d);
     media_free(&d->current);
     d->current = selected;
@@ -176,7 +177,6 @@ select_media(Daemon *d, Media *media, bool update_state, bool transition, char *
     memset(d->dy, 0, sizeof d->dy);
     memset(d->follow_x, 0, sizeof d->follow_x);
     memset(d->follow_y, 0, sizeof d->follow_y);
-    d->fade_start = fade ? now_ms() : 0;
     d->dirty = d->publish = true;
     d->notice[0] = '\0';
     if (update_state) {
@@ -185,6 +185,8 @@ select_media(Daemon *d, Media *media, bool update_state, bool transition, char *
         if (!state_write(d->paths, &d->state))
             snprintf(d->notice, sizeof d->notice, "Wallpaper applied. Could not save session state.");
     }
+    d->fade_start = fade ? now_ms() : 0;
+    d->fade_revealed = false;
     return true;
 }
 
@@ -511,14 +513,21 @@ draw(Daemon *d, uint64_t now, bool force)
         d->drifting |= advance_parallax(d, i, delta, px, py, drift_active, suspended || video);
     }
     d->blur_ready = true;
-    double fade = 0;
+    double opacity = 1;
+    bool outgoing = false;
     if (d->fade_start) {
-        double t = cfg->crossfade_ms ? (now - d->fade_start) / (double)cfg->crossfade_ms : 1;
-        if (t >= 1 || blank || force) d->fade_start = 0;
-        else fade = 1 - t * t * (3 - 2 * t);
-        d->dirty = true;
+        double t = cfg->fade_ms ? (now - d->fade_start) / (double)cfg->fade_ms : 1;
+        if (t >= 1 || suspended || force) d->fade_start = 0;
+        else {
+            outgoing = t < .5;
+            // Present black once before revealing the new scene, even if a frame missed the midpoint.
+            double phase = outgoing ? 1 - 2 * t : d->fade_revealed ? 2 * t - 1 : 0;
+            opacity = phase * phase * (3 - 2 * phase);
+            if (outgoing) opacity *= d->fade_from_opacity;
+            else d->fade_revealed = true;
+        }
     }
-    x11_paint(&d->x, cfg, &d->current, d->dx, d->dy, d->blur_radius, fade, d->dirty || force);
+    x11_paint(&d->x, cfg, &d->current, d->dx, d->dy, d->blur_radius, opacity, outgoing, d->dirty || force);
     if (d->publish && !d->fade_start) {
         x11_publish(&d->x);
         d->publish = false;
@@ -807,10 +816,11 @@ daemon_run(const Paths *paths, int ready)
             d.inspect_at = now + 300;
             maintain_rotation(&d, now);
             while (waitpid(-1, NULL, WNOHANG) > 0) {}
+            now = now_ms();
         }
         if (now >= d.paint_at || d.dirty) {
             draw(&d, now, false);
-            int delay = (d.playing || d.fade_start) ? 12 : d.blurring ? 16 : d.drifting ? 1000 / d.cfg.parallax_fps : 100;
+            int delay = d.playing ? 12 : (d.fade_start || d.blurring) ? 16 : d.drifting ? 1000 / d.cfg.parallax_fps : 100;
             d.paint_at = now + (unsigned)delay;
         }
         uint64_t next = d.paint_at < d.inspect_at ? d.paint_at : d.inspect_at;
